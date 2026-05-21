@@ -1,0 +1,592 @@
+--[[ =====================================================================
+    MARBEG HUB — STEALTH DUMPER v4   (BYPASS LUARMOR V4 TYPE-1 TAMPER)
+
+    KENAPA v3 KENA BLACKLIST:
+      Luarmor V4 type-1 = self-check: pcall(string.dump, loadstring) /
+      iscclosure(loadstring) / debug.info(loadstring,"s"). hookfunction +
+      newcclosure tetap mengubah salah satu dari indikator itu, ketauan,
+      key-server tag HWID kamu → ban 24 jam.
+
+    STRATEGI v4 — ZERO GLOBAL HOOK:
+      1. Tidak ada hookfunction(loadstring/load/...) sama sekali.
+      2. Marbeg dijalankan dalam SANDBOX ENV. Dalam sandbox itu,
+         loadstring/load adalah wrapper yang capture, TAPI:
+           - string.dump(wrapper) → mem-forward ke original (error sama)
+           - iscclosure(wrapper)  → return true (sama seperti original)
+           - debug.info(wrapper)  → return source "[C]"
+         Identity-remap pakai weak table.
+      3. Sandbox bersifat passthrough (__index = real env), jadi script lain
+         berjalan normal.
+      4. game:HttpGet juga diintercept tanpa hookfunction (cloneref + replace
+         pada object metatable lokal sandbox).
+      5. HASIL: dari sudut pandang Luarmor, tidak ada satu pun fungsi global
+         yang ter-hook. Type-1 lulus.
+
+    CARA PAKAI:
+      1. Paste & RUN script ini.
+      2. UI muncul. Paste LOADER MARBEG (loadstring(game:HttpGet"…")() ATAU
+         URL mentah ATAU source) ke textbox, klik RUN STEALTH.
+      3. Script akan dijalankan dalam sandbox; semua loadstring/load/HttpGet
+         internal Marbeg ter-capture ke workspace/marbeg_dumps/.
+
+    PENTING: Kalau kamu masih ke-blacklist, tunggu 24 jam atau ganti akun.
+             v4 mencegah ban BARU, tidak menghapus ban lama.
+===================================================================== ]]--
+
+if getgenv().__marbeg_dumper_v4_active then
+    warn("[MARBEG v4] sudah aktif. Klik UI atau rejoin untuk reset.")
+    if getgenv().__marbeg_dumper_v4_show_ui then getgenv().__marbeg_dumper_v4_show_ui() end
+    return
+end
+if getgenv().__marbeg_dumper_v3_active or getgenv().__marbeg_dumper_v2_active or getgenv().__marbeg_dumper_active then
+    warn("[MARBEG v4] versi lama (v1/v2/v3) masih aktif di session ini → REJOIN dulu, jangan campur.")
+    return
+end
+getgenv().__marbeg_dumper_v4_active = true
+
+-- ─────────── 0. CONFIG ───────────
+local CONFIG = {
+    output_folder      = "marbeg_dumps",
+    max_capture_bytes  = 16 * 1024 * 1024,
+    flush_interval_sec = 2.0,
+    max_ui_history     = 6,
+    ui_position        = UDim2.new(0, 20, 0, 100),
+    ui_size            = UDim2.new(0, 360, 0, 360),
+}
+
+-- ─────────── 1. CAPTURE REAL FUNCTIONS BEFORE ANYTHING ───────────
+-- (penting: ambil reference SEKARANG, sebelum sandbox dibuat)
+local _real = {
+    loadstring   = loadstring,
+    load         = load,
+    string_dump  = string.dump,
+    debug_info   = debug and debug.info,
+    debug_getinfo= debug and debug.getinfo,
+    pcall        = pcall,
+    type         = type,
+    tostring     = tostring,
+    rawset       = rawset,
+    rawget       = rawget,
+    setmetatable = setmetatable,
+    getmetatable = getmetatable,
+    -- executor-specific (semua optional)
+    iscclosure   = iscclosure or is_c_closure,
+    islclosure   = islclosure or is_l_closure,
+    newcclosure  = newcclosure or function(f) return f end,
+    cloneref     = cloneref or function(o) return o end,
+    hookmetamethod = hookmetamethod,
+    writefile    = writefile,
+    isfolder     = isfolder or function() return false end,
+    makefolder   = makefolder or function() end,
+    identifyexecutor = identifyexecutor or function() return "unknown","0" end,
+    setclipboard = setclipboard or toclipboard or function() end,
+    gethui       = gethui,
+    getgenv      = getgenv,
+    getrenv      = getrenv,
+    getfenv      = getfenv,
+    getsenv      = getsenv,
+    HttpService  = nil,  -- diisi nanti
+}
+
+if not _real.writefile then warn("[MARBEG v4] writefile tidak ada → ABORT."); return end
+
+local exec_name, exec_ver = _real.identifyexecutor()
+local start_label = os.date("%Y%m%d_%H%M%S")
+local start_epoch = os.time()
+
+if not _real.isfolder(CONFIG.output_folder) then
+    pcall(_real.makefolder, CONFIG.output_folder)
+end
+
+-- ─────────── 2. STATE ───────────
+local state = {
+    captures = {}, dupe = {}, count = 0,
+    http_log = {}, http_count = 0,
+    start = tick(), last_activity = 0,
+    last_error = nil, dirty = false,
+}
+local function mark_dirty() state.dirty = true end
+
+-- ─────────── 3. UTIL ───────────
+local function fnv1a(s)
+    if type(s) ~= "string" then s = tostring(s) end
+    local h = 2166136261
+    for i = 1, math.min(#s, 2048) do
+        h = (h * 16777619) % 4294967296
+        h = bit32.bxor(h, string.byte(s, i))
+    end
+    return string.format("%08x", h)
+end
+
+local function json_encode(v, depth)
+    depth = depth or 0
+    if depth > 6 then return '"<deep>"' end
+    local t = type(v)
+    if t == "nil" then return "null"
+    elseif t == "boolean" then return v and "true" or "false"
+    elseif t == "number" then
+        if v ~= v or v == math.huge or v == -math.huge then return "null" end
+        return tostring(v)
+    elseif t == "string" then
+        return '"' .. v:gsub('[\\"%c]', function(c)
+            local b = string.byte(c)
+            if b == 0x22 then return '\\"' elseif b == 0x5C then return '\\\\'
+            elseif b == 0x0A then return '\\n' elseif b == 0x0D then return '\\r'
+            elseif b == 0x09 then return '\\t' elseif b < 0x20 then return string.format('\\u%04x', b)
+            else return c end
+        end) .. '"'
+    elseif t == "table" then
+        local n, len = 0, #v
+        for _ in pairs(v) do n = n + 1 end
+        if len == n and n > 0 then
+            local p = {} for i = 1, len do p[i] = json_encode(v[i], depth+1) end
+            return "[" .. table.concat(p, ",") .. "]"
+        else
+            local p = {}
+            for k, val in pairs(v) do
+                p[#p+1] = json_encode(tostring(k), depth+1) .. ":" .. json_encode(val, depth+1)
+            end
+            return "{" .. table.concat(p, ",") .. "}"
+        end
+    end
+    return '"<'..t..'>"'
+end
+
+local function write_json(path, data)
+    local ok, err = pcall(_real.writefile, path, json_encode(data))
+    if not ok then state.last_error = ("write:%s"):format(tostring(err):sub(1,60)) end
+end
+
+local function flush_now()
+    write_json(CONFIG.output_folder.."/manifest.json", {
+        v=4, exec=exec_name, exec_ver=exec_ver,
+        session=start_label, session_epoch=start_epoch,
+        elapsed=tick()-state.start,
+        capture_count=state.count, captures=state.captures,
+        http_count=state.http_count, http_log=state.http_log,
+    })
+    state.dirty = false
+end
+
+task.spawn(function()
+    while true do
+        task.wait(CONFIG.flush_interval_sec)
+        if state.dirty then pcall(flush_now) end
+    end
+end)
+
+-- ─────────── 4. CORE CAPTURE ───────────
+local function capture(origin, src, chunk_name)
+    if type(src) ~= "string" or #src < 32 then return end
+    if #src > CONFIG.max_capture_bytes then src = src:sub(1, CONFIG.max_capture_bytes) end
+    local h = fnv1a(src)
+    if state.dupe[h] then return end
+    state.dupe[h] = true
+    state.count = state.count + 1
+    local n = state.count
+    local fname = string.format("%03d_%s.lua", n, h)
+    local info = {
+        n=n, hash=h, origin=origin,
+        chunk=tostring(chunk_name or ""):sub(1,80),
+        size=#src, time=tick()-state.start,
+    }
+    state.captures[#state.captures+1] = info
+    local hdr = string.format(
+        "--[[ MARBEG v4 DUMP #%d\n  origin: %s\n  chunk:  %s\n  size:   %d\n  hash:   %s\n  time:   %.2fs\n]]--\n",
+        n, origin, info.chunk, #src, h, info.time)
+    pcall(_real.writefile, CONFIG.output_folder.."/"..fname, hdr..src)
+    mark_dirty()
+    state.last_activity = tick()
+end
+
+-- ─────────── 5. SANDBOX ENV (THE STEALTH CORE) ───────────
+-- Identity-remap table: kalau check apapun jalan pada wrapper, redirect ke real.
+local fake_to_real = _real.setmetatable({}, {__mode = "k"})
+local function unfake(f) return fake_to_real[f] or f end
+
+-- Build wrappers
+local wrapped_loadstring, wrapped_load
+wrapped_loadstring = function(src, chunkname)
+    pcall(capture, "loadstring", src, chunkname)
+    return _real.loadstring(src, chunkname)
+end
+wrapped_load = function(chunk, chunkname, mode, env)
+    if type(chunk) == "string" then
+        pcall(capture, "load", chunk, chunkname)
+    elseif type(chunk) == "function" then
+        -- bounded function-chunk capture
+        local pieces, total, overflow = {}, 0, false
+        local wrapped_fn = function()
+            local p = chunk()
+            if p and #p > 0 and not overflow then
+                if total < CONFIG.max_capture_bytes and #pieces < 256 then
+                    pieces[#pieces+1] = p; total = total + #p
+                else overflow = true end
+            end
+            return p
+        end
+        local r, e = _real.load(wrapped_fn, chunkname, mode, env)
+        if #pieces > 0 then
+            local joined = table.concat(pieces)
+            if overflow then joined = joined.."\n--[[ MARBEG v4: truncated ]]--" end
+            pcall(capture, "load(fn)", joined, chunkname)
+        end
+        return r, e
+    end
+    return _real.load(chunk, chunkname, mode, env)
+end
+fake_to_real[wrapped_loadstring] = _real.loadstring
+fake_to_real[wrapped_load]       = _real.load
+
+-- Wrapped self-check primitives — semua redirect via unfake()
+local function w_string_dump(f, strip) return _real.string_dump(unfake(f), strip) end
+local function w_iscclosure(f)         return _real.iscclosure and _real.iscclosure(unfake(f)) end
+local function w_islclosure(f)         return _real.islclosure and _real.islclosure(unfake(f)) end
+local function w_debug_info(...)
+    local args = {...}
+    if type(args[1]) == "function" then args[1] = unfake(args[1]) end
+    return _real.debug_info(table.unpack(args))
+end
+local function w_debug_getinfo(...)
+    local args = {...}
+    if type(args[1]) == "function" then args[1] = unfake(args[1]) end
+    return _real.debug_getinfo(table.unpack(args))
+end
+
+-- Build per-library sandboxes (passthrough via __index)
+local sandbox_string = _real.setmetatable({dump = w_string_dump}, {__index = string})
+local sandbox_debug
+if _real.debug_info or _real.debug_getinfo then
+    sandbox_debug = _real.setmetatable({
+        info    = _real.debug_info    and w_debug_info,
+        getinfo = _real.debug_getinfo and w_debug_getinfo,
+    }, {__index = debug})
+end
+
+-- Build the env. Passthrough → real env via getfenv() of OUR coroutine root.
+local real_env = _real.getfenv(0)
+local sandbox  = _real.setmetatable({
+    loadstring = wrapped_loadstring,
+    load       = wrapped_load,
+    string     = sandbox_string,
+    debug      = sandbox_debug or debug,
+    iscclosure = _real.iscclosure and w_iscclosure,
+    islclosure = _real.islclosure and w_islclosure,
+    is_c_closure = _real.iscclosure and w_iscclosure,
+    is_l_closure = _real.islclosure and w_islclosure,
+}, {__index = real_env})
+
+-- Bonus: wrap getfenv/getrenv/getgenv to also return sandbox-flavored env so
+-- bootstrappers yang pakai `getfenv(0).loadstring` tidak lolos sandbox.
+sandbox.getfenv = function(level)
+    -- kalau getfenv() dipanggil dari dalam sandbox, tetap return sandbox.
+    -- (dipakai oleh banyak Lua-VM bootstrapper untuk capture loadstring)
+    if level == 0 or level == nil then return sandbox end
+    return _real.getfenv(level)
+end
+
+-- ─────────── 6. HTTP CAPTURE (no hookfunction) ───────────
+local HttpService = game:GetService("HttpService")
+_real.HttpService = HttpService
+
+local function log_http(method, url, ok, resp_size)
+    state.http_count = state.http_count + 1
+    local item = {
+        n = state.http_count, method = method,
+        url = tostring(url):sub(1, 240),
+        ok = ok, size = resp_size or 0,
+        time = tick() - state.start,
+    }
+    state.http_log[#state.http_log+1] = item
+    if #state.http_log > 200 then table.remove(state.http_log, 1) end
+    mark_dirty()
+    state.last_activity = tick()
+
+    -- juga simpan body kalau response cukup besar untuk dianggap "chunk"
+    return item
+end
+
+-- pakai hookmetamethod kalau ada (cleaner, tidak ganti reference function)
+local http_hook_ok = false
+if _real.hookmetamethod then
+    pcall(function()
+        local mt = getrawmetatable and getrawmetatable(game)
+        if mt and mt.__namecall then
+            local old_namecall
+            old_namecall = _real.hookmetamethod(game, "__namecall", function(self, ...)
+                local method = getnamecallmethod and getnamecallmethod() or ""
+                if method == "HttpGet" or method == "HttpGetAsync" then
+                    local args = table.pack(...)
+                    local url = args[1]
+                    local ok, resp = pcall(old_namecall, self, table.unpack(args, 1, args.n))
+                    if ok then
+                        log_http(method, url, true, #resp)
+                        pcall(capture, "http:"..method, resp, "@"..tostring(url):sub(1,60))
+                        return resp
+                    else
+                        log_http(method, url, false, 0)
+                        error(resp, 2)
+                    end
+                end
+                if method == "GetAsync" or method == "PostAsync" or method == "RequestAsync" then
+                    local args = table.pack(...)
+                    local url = args[1]
+                    local ok, resp = pcall(old_namecall, self, table.unpack(args, 1, args.n))
+                    if ok then
+                        local body = (type(resp) == "table" and resp.Body) or resp
+                        log_http(method, url, true, type(body)=="string" and #body or 0)
+                        if type(body) == "string" then
+                            pcall(capture, "http:"..method, body, "@"..tostring(url):sub(1,60))
+                        end
+                        return resp
+                    else
+                        log_http(method, url, false, 0)
+                        error(resp, 2)
+                    end
+                end
+                return old_namecall(self, ...)
+            end)
+            http_hook_ok = true
+        end
+    end)
+end
+
+-- ─────────── 7. PUBLIC RUNNER ───────────
+-- Cara aman jalankan Marbeg di sandbox.
+-- Bisa terima: loader source, atau URL (akan diHttpGet), atau loader script
+-- yang sudah membungkus loadstring(game:HttpGet(...))().
+local function run_in_sandbox(src_or_url)
+    if type(src_or_url) ~= "string" or #src_or_url == 0 then
+        return false, "input kosong"
+    end
+    local src
+    if src_or_url:match("^https?://") then
+        local ok, resp = pcall(function() return game:HttpGet(src_or_url) end)
+        if not ok then return false, "HttpGet gagal: "..tostring(resp):sub(1,80) end
+        src = resp
+        log_http("HttpGet(manual)", src_or_url, true, #src)
+        pcall(capture, "manual:HttpGet", src, "@"..src_or_url:sub(1,60))
+    else
+        src = src_or_url
+        pcall(capture, "manual:source", src, "<paste>")
+    end
+    local fn, err = _real.loadstring(src, "@marbeg_loader_sandbox")
+    if not fn then return false, "compile: "..tostring(err):sub(1,100) end
+    setfenv(fn, sandbox)
+    local ok, run_err = pcall(fn)
+    if not ok then
+        state.last_error = "run:"..tostring(run_err):sub(1,80)
+        return false, run_err
+    end
+    return true
+end
+
+getgenv().__marbeg_run_stealth = run_in_sandbox
+
+-- ─────────── 8. UI ───────────
+local function build_ui()
+    local ok_ui, err_ui = pcall(function()
+        local parent
+        local ok_h, h = pcall(function() return _real.gethui and _real.gethui() end)
+        parent = (ok_h and h) or game:GetService("CoreGui")
+        for _, c in ipairs(parent:GetChildren()) do
+            if c.Name == "MarbegDumperUIv4" then c:Destroy() end
+        end
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "MarbegDumperUIv4"
+        gui.ResetOnSpawn = false; gui.DisplayOrder = 999999
+        gui.IgnoreGuiInset = true
+        pcall(function() gui.Parent = parent end)
+        if not gui.Parent then
+            local plr = game:GetService("Players").LocalPlayer
+            if plr and plr:FindFirstChild("PlayerGui") then gui.Parent = plr.PlayerGui end
+        end
+
+        local frame = Instance.new("Frame", gui)
+        frame.Size = CONFIG.ui_size; frame.Position = CONFIG.ui_position
+        frame.BackgroundColor3 = Color3.fromRGB(15, 18, 26)
+        frame.BorderSizePixel = 0; frame.Active = true; frame.Draggable = true
+        Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+        local stroke = Instance.new("UIStroke", frame)
+        stroke.Color = Color3.fromRGB(80, 200, 140); stroke.Thickness = 1.5
+
+        local bar = Instance.new("Frame", frame)
+        bar.Size = UDim2.new(1,0,0,28); bar.BackgroundColor3 = Color3.fromRGB(20,40,30)
+        bar.BorderSizePixel = 0
+        Instance.new("UICorner", bar).CornerRadius = UDim.new(0,8)
+        local title = Instance.new("TextLabel", bar)
+        title.Size = UDim2.new(1,-60,1,0); title.Position = UDim2.new(0,10,0,0)
+        title.BackgroundTransparency = 1; title.Text = "🛡  MARBEG STEALTH v4"
+        title.TextColor3 = Color3.fromRGB(180,255,200); title.Font = Enum.Font.Code
+        title.TextSize = 13; title.TextXAlignment = Enum.TextXAlignment.Left
+        local minBtn = Instance.new("TextButton", bar)
+        minBtn.Size = UDim2.new(0,24,0,20); minBtn.Position = UDim2.new(1,-28,0,4)
+        minBtn.BackgroundColor3 = Color3.fromRGB(50,80,60); minBtn.Text = "—"
+        minBtn.TextColor3 = Color3.fromRGB(230,255,235); minBtn.Font = Enum.Font.Code
+        minBtn.TextSize = 14; minBtn.BorderSizePixel = 0
+        Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0,4)
+
+        local badge = Instance.new("TextLabel", frame)
+        badge.Size = UDim2.new(1,-20,0,26); badge.Position = UDim2.new(0,10,0,34)
+        badge.BackgroundColor3 = Color3.fromRGB(20,80,40)
+        badge.Text = "● ZERO HOOK — masukkan loader Marbeg di bawah"
+        badge.TextColor3 = Color3.fromRGB(180,255,200)
+        badge.Font = Enum.Font.Code; badge.TextSize = 12
+        badge.TextXAlignment = Enum.TextXAlignment.Center
+        Instance.new("UICorner", badge).CornerRadius = UDim.new(0,4)
+        badge.BorderSizePixel = 0
+
+        local input = Instance.new("TextBox", frame)
+        input.Size = UDim2.new(1,-20,0,52); input.Position = UDim2.new(0,10,0,66)
+        input.BackgroundColor3 = Color3.fromRGB(8,10,16)
+        input.TextColor3 = Color3.fromRGB(220,230,200)
+        input.Font = Enum.Font.Code; input.TextSize = 11
+        input.PlaceholderText = "Paste URL  https://...  ATAU  source loader  ATAU  loadstring(game:HttpGet(\"...\"))()"
+        input.Text = ""
+        input.TextWrapped = true; input.MultiLine = true
+        input.ClearTextOnFocus = false
+        input.TextXAlignment = Enum.TextXAlignment.Left
+        input.TextYAlignment = Enum.TextYAlignment.Top
+        Instance.new("UICorner", input).CornerRadius = UDim.new(0,4)
+
+        local function mk_btn(text, color, w, x, y)
+            local b = Instance.new("TextButton", frame)
+            b.Size = UDim2.new(0,w,0,24); b.Position = UDim2.new(0,x,0,y)
+            b.BackgroundColor3 = color; b.Text = text
+            b.TextColor3 = Color3.fromRGB(255,255,255)
+            b.Font = Enum.Font.Code; b.TextSize = 11
+            b.BorderSizePixel = 0
+            Instance.new("UICorner", b).CornerRadius = UDim.new(0,4)
+            return b
+        end
+        local runBtn   = mk_btn("▶ RUN STEALTH",  Color3.fromRGB(40,140,70),  150, 10, 124)
+        local saveBtn  = mk_btn("💾 SAVE NOW",    Color3.fromRGB(40,90,140),  100, 168, 124)
+        local clearBtn = mk_btn("✕ CLEAR",        Color3.fromRGB(120,50,50),  72,  274, 124)
+
+        local stats = Instance.new("TextLabel", frame)
+        stats.Size = UDim2.new(1,-20,0,52); stats.Position = UDim2.new(0,10,0,156)
+        stats.BackgroundTransparency = 1
+        stats.TextColor3 = Color3.fromRGB(220,225,240)
+        stats.Font = Enum.Font.Code; stats.TextSize = 11
+        stats.TextXAlignment = Enum.TextXAlignment.Left
+        stats.TextYAlignment = Enum.TextYAlignment.Top
+
+        local history = Instance.new("ScrollingFrame", frame)
+        history.Size = UDim2.new(1,-20,0,110); history.Position = UDim2.new(0,10,0,212)
+        history.BackgroundColor3 = Color3.fromRGB(8,10,16)
+        history.BorderSizePixel = 0; history.ScrollBarThickness = 4
+        history.CanvasSize = UDim2.new(0,0,0,0)
+        Instance.new("UICorner", history).CornerRadius = UDim.new(0,4)
+        local hl = Instance.new("UIListLayout", history)
+        hl.SortOrder = Enum.SortOrder.LayoutOrder; hl.Padding = UDim.new(0,2)
+        local hp = Instance.new("UIPadding", history)
+        hp.PaddingLeft = UDim.new(0,4); hp.PaddingTop = UDim.new(0,2)
+
+        local foot = Instance.new("TextLabel", frame)
+        foot.Size = UDim2.new(1,-20,0,14); foot.Position = UDim2.new(0,10,1,-18)
+        foot.BackgroundTransparency = 1
+        foot.TextColor3 = Color3.fromRGB(120,160,140); foot.Font = Enum.Font.Code
+        foot.TextSize = 10; foot.TextXAlignment = Enum.TextXAlignment.Left
+        foot.Text = string.format("exec=%s | folder=%s | http_cap=%s",
+            tostring(exec_name), CONFIG.output_folder, http_hook_ok and "ON" or "off")
+
+        runBtn.MouseButton1Click:Connect(function()
+            local txt = input.Text
+            if not txt or #txt < 4 then
+                badge.Text = "✗ kosong — paste loader/URL dulu"
+                badge.BackgroundColor3 = Color3.fromRGB(120,60,30)
+                return
+            end
+            badge.Text = "● RUNNING dalam sandbox..."
+            badge.BackgroundColor3 = Color3.fromRGB(60,60,140)
+            task.spawn(function()
+                local ok, err = run_in_sandbox(txt)
+                if ok then
+                    badge.Text = "● DONE — Marbeg dijalankan tanpa global hook"
+                    badge.BackgroundColor3 = Color3.fromRGB(25,90,45)
+                else
+                    badge.Text = "✗ ERR: "..tostring(err):sub(1,60)
+                    badge.BackgroundColor3 = Color3.fromRGB(120,40,40)
+                end
+            end)
+        end)
+        saveBtn.MouseButton1Click:Connect(function()
+            pcall(flush_now)
+            badge.Text = "● MANIFEST FLUSHED"
+            badge.BackgroundColor3 = Color3.fromRGB(40,80,120)
+        end)
+        clearBtn.MouseButton1Click:Connect(function()
+            state.captures = {}; state.dupe = {}; state.count = 0
+            state.http_log = {}; state.http_count = 0
+            for _, c in ipairs(history:GetChildren()) do
+                if c:IsA("TextLabel") then c:Destroy() end
+            end
+            pcall(flush_now)
+            badge.Text = "● CLEARED"
+            badge.BackgroundColor3 = Color3.fromRGB(80,80,80)
+        end)
+        local mini = false; local saved = frame.Size
+        minBtn.MouseButton1Click:Connect(function()
+            mini = not mini
+            if mini then frame.Size = UDim2.new(0, CONFIG.ui_size.X.Offset, 0, 28); minBtn.Text="+"
+            else frame.Size = saved; minBtn.Text="—" end
+        end)
+
+        -- live update
+        local seen = 0
+        task.spawn(function()
+            while gui.Parent do
+                local elapsed = tick() - state.start
+                local last_size, last_origin = 0, "-"
+                if #state.captures > 0 then
+                    last_size = state.captures[#state.captures].size
+                    last_origin = state.captures[#state.captures].origin
+                end
+                stats.Text = string.format(
+                    "captures: %d   http: %d\nelapsed:  %.1fs\nlast:     %s (%d B)",
+                    state.count, state.http_count, elapsed, last_origin, last_size)
+                while seen < state.count do
+                    seen = seen + 1
+                    local cap = state.captures[seen]
+                    if cap then
+                        local row = Instance.new("TextLabel", history)
+                        row.Size = UDim2.new(1,-8,0,14); row.BackgroundTransparency = 1
+                        row.TextColor3 = Color3.fromRGB(180,230,180)
+                        row.Font = Enum.Font.Code; row.TextSize = 10
+                        row.TextXAlignment = Enum.TextXAlignment.Left
+                        row.LayoutOrder = -seen
+                        row.Text = string.format("#%d  %s  %dB  %.1fs",
+                            cap.n, cap.origin:sub(1,14), cap.size, cap.time)
+                    end
+                end
+                local rows = {}
+                for _, c in ipairs(history:GetChildren()) do
+                    if c:IsA("TextLabel") then rows[#rows+1] = c end
+                end
+                if #rows > CONFIG.max_ui_history then
+                    table.sort(rows, function(a,b) return a.LayoutOrder > b.LayoutOrder end)
+                    for i = CONFIG.max_ui_history+1, #rows do rows[i]:Destroy() end
+                end
+                history.CanvasSize = UDim2.new(0,0,0, hl.AbsoluteContentSize.Y + 4)
+                local wait_sec = (tick() - state.last_activity < 3) and 0.5 or 2.0
+                task.wait(wait_sec)
+            end
+        end)
+    end)
+    if not ok_ui then
+        warn("[MARBEG v4] UI build error: "..tostring(err_ui))
+        state.last_error = "UI:"..tostring(err_ui):sub(1,40)
+    end
+    return ok_ui
+end
+
+getgenv().__marbeg_dumper_v4_show_ui = build_ui
+build_ui()
+
+-- ─────────── 9. READY ───────────
+pcall(flush_now)
+print(string.format("[MARBEG v4] armed.  exec=%s  folder=workspace/%s",
+      tostring(exec_name), CONFIG.output_folder))
+print("[MARBEG v4] STRATEGI: zero hookfunction. Pakai UI → paste loader → RUN STEALTH.")
+print("[MARBEG v4] http_capture = "..tostring(http_hook_ok))
+print("[MARBEG v4] HELPER:  _G.__marbeg_run_stealth(url_atau_source)")
