@@ -318,11 +318,7 @@ local function saveReport()
     return saved, path
 end
 
--- ═════════════ INITIAL SCAN ══════════════════════════════════════
-scanStatic()
-scanModules()
-
--- ═════════════ UI ════════════════════════════════════════════════
+-- ═════════════ UI (created FIRST, scan async after) ═══════════════
 local gui = Instance.new('ScreenGui')
 gui.Name = 'HSHub_MapScan_' .. tostring(math.random(100000, 999999))
 gui.ResetOnSpawn = false; gui.IgnoreGuiInset = true
@@ -367,11 +363,7 @@ closeBtn.MouseButton1Click:Connect(function()
     gui:Destroy(); shared.__HSHub_MapScan_Running = nil
 end)
 
--- Stats
-local moduleCount = 0; for _ in pairs(OUT.modules) do moduleCount = moduleCount + 1 end
-local moduleOK = 0
-for _, m in pairs(OUT.modules) do if not m.error then moduleOK = moduleOK + 1 end end
-
+-- Stats (updated by background scan)
 local stat = Instance.new('TextLabel', frame)
 stat.BackgroundTransparency = 1
 stat.Size = UDim2.new(1, -28, 0, 60); stat.Position = UDim2.new(0, 14, 0, 56)
@@ -380,11 +372,19 @@ stat.TextColor3 = Color3.fromRGB(200, 220, 255)
 stat.TextXAlignment = Enum.TextXAlignment.Left
 stat.TextYAlignment = Enum.TextYAlignment.Top
 stat.TextWrapped = true
-stat.Text = ('Game: %s\nRS.Remotes: %d · LP.Remotes: %d · Shrines: %d\nModules dumped: %d/%d (%s)'):format(
-    OUT.game_name,
-    #OUT.static.remotes_RS, #OUT.static.remotes_LP, #OUT.static.shrines,
-    moduleOK, moduleCount,
-    moduleOK == moduleCount and 'all OK' or 'some errored — check JSON')
+stat.Text = 'Scanning game state + modules...\n(this takes 2-5 seconds)'
+
+local function updateStat()
+    local moduleCount, moduleOK = 0, 0
+    for _, m in pairs(OUT.modules) do
+        moduleCount = moduleCount + 1
+        if not m.error then moduleOK = moduleOK + 1 end
+    end
+    stat.Text = ('Game: %s\nRS.Remotes: %d · LP.Remotes: %d · Shrines: %d\nModules: %d/%d OK'):format(
+        OUT.game_name:sub(1, 60),
+        #OUT.static.remotes_RS, #OUT.static.remotes_LP, #OUT.static.shrines,
+        moduleOK, moduleCount)
+end
 
 -- Label
 local lblBox = Instance.new('TextBox', frame)
@@ -438,14 +438,53 @@ local function logRow(text, color)
     scroll.CanvasPosition = Vector2.new(0, scroll.CanvasSize.Y.Offset)
 end
 
-logRow('Static + module scan complete.', Color3.fromRGB(170, 230, 180))
-for name, info in pairs(OUT.modules) do
-    if info.error then
-        logRow(('  ✗ %s: %s'):format(name, info.error:sub(1, 60)), Color3.fromRGB(255, 150, 150))
+logRow('Starting scan (UI ready)...', Color3.fromRGB(170, 230, 180))
+
+-- Run scans in background so UI stays responsive
+task.spawn(function()
+    local ok, err = pcall(scanStatic)
+    if ok then
+        logRow(('Static: %d remotes RS, %d LP, %d shrines'):format(
+            #OUT.static.remotes_RS, #OUT.static.remotes_LP, #OUT.static.shrines),
+            Color3.fromRGB(170, 230, 180))
     else
-        logRow(('  ✓ %s: %s'):format(name, info.return_type), Color3.fromRGB(180, 220, 255))
+        logRow('Static scan FAIL: ' .. tostring(err):sub(1, 80), Color3.fromRGB(255, 150, 150))
     end
-end
+    updateStat()
+
+    -- Scan modules one by one with progress
+    local rf = RS:FindFirstChild('_replicationFolder')
+    if not rf then
+        logRow('_replicationFolder NOT FOUND', Color3.fromRGB(255, 150, 150))
+        updateStat()
+        return
+    end
+    for _, name in ipairs(PRIORITY_MODULES) do
+        local mod = rf:FindFirstChild(name)
+        if mod then
+            local okr, result = pcall(dumpModule, mod)
+            if okr then
+                OUT.modules[name] = result
+                if result and result.error then
+                    logRow(('  ✗ %s: %s'):format(name, tostring(result.error):sub(1, 50)),
+                        Color3.fromRGB(255, 180, 130))
+                else
+                    logRow(('  ✓ %s: %s'):format(name, result and result.return_type or '?'),
+                        Color3.fromRGB(180, 220, 255))
+                end
+            else
+                OUT.modules[name] = { error = tostring(result):sub(1, 200) }
+                logRow(('  ✗ %s: pcall err'):format(name), Color3.fromRGB(255, 150, 150))
+            end
+        else
+            OUT.modules[name] = { error = 'NOT FOUND in _replicationFolder' }
+            logRow(('  - %s: not in _replicationFolder'):format(name), Color3.fromRGB(180, 180, 180))
+        end
+        task.wait(0.05) -- prevent yield throttle
+    end
+    updateStat()
+    logRow('Scan complete. Ready to capture.', Color3.fromRGB(170, 230, 180))
+end)
 
 local lastShown = 0
 task.spawn(function()
