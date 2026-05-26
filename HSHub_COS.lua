@@ -6,8 +6,8 @@
                   discord.gg/5rpP6faZSJ
 
     Game     : Creatures of Sonaria  (Roblox creature survival)
-    Build    : HS-COS-V2
-    Bundled  : 2026-05-24
+    Build    : HS-COS-V4
+    Bundled  : 2026-05-27
     Library  : HSHub_UI v1.0.0
 
     This is a BUNDLED file. Do not edit directly — instead edit
@@ -2526,11 +2526,7 @@ assert(Stealth, 'HSHub_Stealth not loaded')
 -- ═══════════════════════════════════════════════════════════════════
 --   GAME GUARD
 -- ═══════════════════════════════════════════════════════════════════
-local COS_PLACEIDS = {
-    [5233782396] = true,  -- CoS main (verified live)
-    [4922741943] = true,  -- legacy CoS
-    [3963303927] = true,  -- another known CoS variant
-}
+local COS_PLACEIDS = { [5233782396]=true, [4922741943]=true, [3963303927]=true }
 local PLACE_ISLE10 = 3431407618
 local IS_ISLE10 = (game.PlaceId == PLACE_ISLE10)
 local IS_COS    = COS_PLACEIDS[game.PlaceId] == true
@@ -2550,7 +2546,7 @@ if not IS_COS and not IS_ISLE10 and not NAME_OK then
 end
 
 -- ═══════════════════════════════════════════════════════════════════
---   SERVICES + UTILITIES
+--   SERVICES
 -- ═══════════════════════════════════════════════════════════════════
 local Players          = game:GetService('Players')
 local RunService       = game:GetService('RunService')
@@ -2562,67 +2558,141 @@ local HttpService      = game:GetService('HttpService')
 local Lighting         = game:GetService('Lighting')
 
 local LP = Players.LocalPlayer
-local logW = Stealth.warn or function() end
+local PlayerGui = LP:WaitForChild('PlayerGui')
 
-local function safe(fn, ...)
-    local ok, err = pcall(fn, ...)
-    if not ok then logW(tostring(err)) end
-    return ok
-end
+-- ═══════════════════════════════════════════════════════════════════
+--   GROUND-TRUTH REMOTE PATHS (from HSHub_COS_Diagnostic_V2)
+-- ═══════════════════════════════════════════════════════════════════
+-- ReplicatedStorage.Remotes.* (16 remotes, the main hub)
+local RS_REMOTES = {
+    'DrinkRemote', 'Food', 'Mud', 'Lay', 'Nest',
+    'LavaSelfDamage', 'Sheltered',
+    'RestartSlotRemote', 'GetSpawnedTokenRemote',
+    'StoreActiveCreatureRemote', 'CreateSlotRemote',
+    'PickupResource', 'DepositResource', 'ChunkResource',
+    'ResourceDamageRemote', 'UpgradeNest',
+}
+-- LocalPlayer.Remotes.* (5 player-scoped remotes)
+local LP_REMOTES = {
+    'NestRequestRemote', 'NestJoinRequestRemote',
+    'PartyRequestRemote', 'PartyJoinRequestRemote',
+    'NestSlotPickRequestRemote',
+}
 
--- Remote resolver (lazy cached)
 local _remote_cache = {}
-local function findRemote(name)
+local function getRemote(name)
     if _remote_cache[name] then return _remote_cache[name] end
-    for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-        if (d:IsA('RemoteEvent') or d:IsA('RemoteFunction')) and d.Name == name then
-            _remote_cache[name] = d; return d
-        end
+    -- Try ReplicatedStorage.Remotes first (where most are)
+    local rsRemotes = ReplicatedStorage:FindFirstChild('Remotes')
+    if rsRemotes then
+        local r = rsRemotes:FindFirstChild(name)
+        if r then _remote_cache[name] = r; return r end
     end
+    -- Then try LocalPlayer.Remotes
+    local lpRemotes = LP:FindFirstChild('Remotes')
+    if lpRemotes then
+        local r = lpRemotes:FindFirstChild(name)
+        if r then _remote_cache[name] = r; return r end
+    end
+    return nil
 end
 
 local function fire(name, ...)
-    local r = findRemote(name); if not r then return false end
+    local r = getRemote(name); if not r then return false end
     local args = table.pack(...)
-    return safe(function()
+    return pcall(function()
         if r:IsA('RemoteEvent') then r:FireServer(table.unpack(args, 1, args.n))
-        else r:InvokeServer(table.unpack(args, 1, args.n)) end
+        else return r:InvokeServer(table.unpack(args, 1, args.n)) end
     end)
 end
 
 local function invoke(name, ...)
-    local r = findRemote(name); if not r then return nil end
+    local r = getRemote(name); if not r then return nil end
     local args = table.pack(...)
     local ok, res = pcall(function() return r:InvokeServer(table.unpack(args, 1, args.n)) end)
     if ok then return res end
 end
 
-local function getCreature()
-    return LP.Character
-end
-
-local function getAttr(name)
-    local c = getCreature(); if not c then return nil end
-    return c:GetAttribute(name)
-end
-
-local function setAttr(name, val)
-    local c = getCreature(); if c then pcall(function() c:SetAttribute(name, val) end) end
+-- Fire on another player's Remotes folder (used by AutoAcceptNest)
+local function fireOnPlayer(player, name, ...)
+    local rfolder = player:FindFirstChild('Remotes')
+    if not rfolder then return false end
+    local r = rfolder:FindFirstChild(name)
+    if not r then return false end
+    local args = table.pack(...)
+    return pcall(function() r:FireServer(table.unpack(args, 1, args.n)) end)
 end
 
 -- ═══════════════════════════════════════════════════════════════════
---   STATE TABLE (single source of truth for feature on/off + tunables)
+--   HUD HELPERS
+-- ═══════════════════════════════════════════════════════════════════
+local function getHUDGui() return PlayerGui:FindFirstChild('HUDGui') end
+
+local function hudStatText(stat)
+    local h = getHUDGui(); if not h then return nil end
+    local ok, val = pcall(function() return h.BottomFrame.Other[stat].HoverLabel.Text end)
+    return ok and val or nil
+end
+
+local function shelterColor()
+    local h = getHUDGui(); if not h then return nil end
+    local ok, val = pcall(function()
+        return h.SideFrame.Other.MinimapFrame.ShelterLabel.HoverUpLabel.ImageColor3
+    end)
+    return ok and val or nil
+end
+
+-- ═══════════════════════════════════════════════════════════════════
+--   GROUND-TRUTH WORKSPACE PATHS
+-- ═══════════════════════════════════════════════════════════════════
+-- workspace.Interactions.{Food, Mud, Lakes, TokenNodes, AbandonedEggSpawns, Nests}
+local function interactions() return Workspace:FindFirstChild('Interactions') end
+
+local function getChar() return LP.Character end
+local function getRoot()
+    local c = getChar(); if c then return c:FindFirstChild('HumanoidRootPart') end
+end
+local function getHumanoid()
+    local c = getChar(); if c then return c:FindFirstChildOfClass('Humanoid') end
+end
+
+local function findNearestIn(folder, filter)
+    if not folder then return nil end
+    local r = getRoot(); if not r then return nil end
+    local closest, dist = nil, math.huge
+    for _, m in ipairs(folder:GetChildren()) do
+        local part
+        if m:IsA('BasePart') then part = m
+        elseif m:IsA('Model') then part = m.PrimaryPart or m:FindFirstChildWhichIsA('BasePart')
+            or m:FindFirstChild('Food') or m:FindFirstChild('Mud') end
+        if part and part:IsA('BasePart') then
+            if not filter or filter(m, part) then
+                local d = (part.Position - r.Position).Magnitude
+                if d < dist then closest, dist = m, d end
+            end
+        end
+    end
+    return closest
+end
+
+local function findNearestFood() local i = interactions(); return i and findNearestIn(i:FindFirstChild('Food')) end
+local function findNearestMud()  local i = interactions(); return i and findNearestIn(i:FindFirstChild('Mud')) end
+local function findNearestLake() local i = interactions(); return i and findNearestIn(i:FindFirstChild('Lakes')) end
+local function findNearestToken()local i = interactions(); return i and findNearestIn(i:FindFirstChild('TokenNodes')) end
+local function findNearestEgg() local i = interactions(); return i and findNearestIn(i:FindFirstChild('AbandonedEggSpawns')) end
+
+-- ═══════════════════════════════════════════════════════════════════
+--   STATE TABLE
 -- ═══════════════════════════════════════════════════════════════════
 local S = {
     -- Home/LocalPlayer
     AutoScentHidden=false, InstantLobbyReturn=false, AlwaysKeenObserver=false,
     AlwaysLayEffect=false, AutoShelter=false,
-    -- Home/No-Damage (custom stats)
+    -- Home/No-Damage
     NoLavaDamage=false, NoDrowningDamage=false, NoMeteorDamage=false,
     NoMoistureDamage=false, NoTornadoDamage=false,
-    -- Home/Extra
+    -- Home/Nest
     NestUpgradeTarget='Normal', AutoNestUpgrade=false,
-    -- Home/Auto Nest
     EnableAutoNest=false, InvitationType='Friends', AutoAcceptNest=false,
     -- Custom Stats / Combat
     AutoAggressive=false, AutoScared=false, AntiBrokenLeg=false,
@@ -2632,16 +2702,12 @@ local S = {
     WalkSpeed=30, EnableWalkSpeed=false,
     SprintSpeed=115, EnableSprintSpeed=false,
     FlySpeed=40, EnableFlySpeed=false,
-    -- Autofarm / Survival
+    -- Autofarm
     AutoEat=false, AutoDrink=false, AutoMudRoll=false,
-    -- Autofarm / Token
     AutoGachaTokens=false,
-    -- Autofarm / Mut/Trait
     MutationTarget='', AutoMutations=false,
     TraitTarget='', AutoTraits=false,
-    -- Mush
     AutoMissions=false,
-    -- Recommended
     SelectedCreature='', AutoSpawn=false, DeathPointsTarget=1200, AutoSelfKill=false,
     -- Esp
     GachaEspExplorer=false, GachaEspGalaxy=false, GachaEspMecha=false,
@@ -2649,201 +2715,161 @@ local S = {
     AbandonedEggsEsp=false,
     EnablePlayerEsp=false, EspHealth=false, EspHealthBar=false, EspTracer=false,
     EspNames=false, EspDistance=false, EspBox=false, EspChameleon=false,
-    -- Others / Visual
+    -- Others
     RemoveFog=false, RemoveCameraEffects=false, RemoveDisasterEffects=false,
-    -- Others / Misc
     HidePingFps=false, AntiAFK=false, CustomName='', HideUsername=false,
-    -- Others / Anti-Lag
     LowQualityTextures=false, WhiteScreen=false,
-    -- Tunables
-    LoopInterval=0.5, JitterPct=0.15,
 }
 
 -- ═══════════════════════════════════════════════════════════════════
 --   UI BUILD
 -- ═══════════════════════════════════════════════════════════════════
 local Window = HSHub:CreateWindow({
-    Title     = 'HS HUB',
-    Subtitle  = 'Creatures of Sonaria' .. (IS_ISLE10 and ' (Isle 10)' or ''),
-    Tag       = 'HS-COS-V2',
-    ToggleKey = 'RightShift',
+    Title='HS HUB', Subtitle='Creatures of Sonaria' .. (IS_ISLE10 and ' (Isle 10)' or ''),
+    Tag='HS-COS-V4', ToggleKey='RightShift',
 })
 
 -- ─── Tab 1: HOME ────────────────────────────────────────────────────
 do
     local Tab = Window:CreateTab('Home', '◐')
+    local M = Tab:CreateSection('MENU')
+    M:AddButton({ Name='Get Max Storage Slots', Callback=function()
+        -- LUNAR maps this to NestRequestRemote with action arg; harmless fallback
+        fireOnPlayer(LP, 'NestRequestRemote', 'MaxStorage')
+        HSHub:Notify('Max storage requested', 'ok', 2)
+    end })
 
-    local Menu = Tab:CreateSection('MENU')
-    Menu:AddButton({ Name='Get Max Storage Slots',
-        Callback=function()
-            invoke('NestRequestRemote', 'MaxStorage')
-            HSHub:Notify('Max storage requested', 'ok', 2)
-        end })
-
-    local LP_ = Tab:CreateSection('LOCALPLAYER')
-    LP_:AddToggle({ Name='Auto Scent Hidden', Key='AutoScentHidden', Default=false,
-        Tip='Prevent other players from sniffing your creature',
-        Callback=function(v) S.AutoScentHidden=v end })
-    LP_:AddToggle({ Name='Instant Lobby Return', Key='InstantLobby', Default=false,
-        Tip='No cooldown or penalty returning to lobby',
-        Callback=function(v) S.InstantLobbyReturn=v end })
-    LP_:AddToggle({ Name='Always Keen Observer', Key='KeenObs', Default=false,
-        Tip='Gives Keen Observer to any creature',
-        Callback=function(v) S.AlwaysKeenObserver=v end })
-    LP_:AddToggle({ Name='Always Lay Effect', Key='AlwaysLay', Default=false,
-        Tip='Laid back effect, cures negative effects 4x faster',
-        Callback=function(v) S.AlwaysLayEffect=v end })
-    LP_:AddToggle({ Name='Auto Shelter', Key='AutoShelter', Default=false,
-        Tip='No damage from acid rain, earthquakes, heat waves',
+    local L = Tab:CreateSection('LOCALPLAYER')
+    L:AddToggle({ Name='Auto Scent Hidden', Key='ASH', Default=false, Callback=function(v) S.AutoScentHidden=v end })
+    L:AddToggle({ Name='Instant Lobby Return', Key='ILR', Default=false, Callback=function(v) S.InstantLobbyReturn=v end })
+    L:AddToggle({ Name='Always Keen Observer', Key='AKO', Default=false, Callback=function(v) S.AlwaysKeenObserver=v end })
+    L:AddToggle({ Name='Always Lay Effect', Key='ALE', Default=false, Callback=function(v) S.AlwaysLayEffect=v end })
+    L:AddToggle({ Name='Auto Shelter', Key='AS', Default=false,
+        Tip='Fires Sheltered when shelter indicator turns red',
         Callback=function(v) S.AutoShelter=v end })
 
-    local Dmg = Tab:CreateSection('NO DAMAGE')
-    Dmg:AddToggle({ Name='No Lava Damage',     Key='NoLava',    Default=false,
-        Callback=function(v) S.NoLavaDamage=v end })
-    Dmg:AddToggle({ Name='No Drowning Damage', Key='NoDrown',   Default=false,
-        Callback=function(v) S.NoDrowningDamage=v end })
-    Dmg:AddToggle({ Name='No Meteor Damage',   Key='NoMeteor',  Default=false,
-        Callback=function(v) S.NoMeteorDamage=v end })
-    Dmg:AddToggle({ Name='No Moisture Damage', Key='NoMoisture',Default=false,
-        Callback=function(v) S.NoMoistureDamage=v end })
-    Dmg:AddToggle({ Name='No Tornado Damage',  Key='NoTornado', Default=false,
-        Callback=function(v) S.NoTornadoDamage=v end })
+    local D = Tab:CreateSection('NO DAMAGE')
+    D:AddToggle({ Name='No Lava Damage',     Key='NLD', Default=false, Callback=function(v) S.NoLavaDamage=v end })
+    D:AddToggle({ Name='No Drowning Damage', Key='NDD', Default=false, Callback=function(v) S.NoDrowningDamage=v end })
+    D:AddToggle({ Name='No Meteor Damage',   Key='NMeD',Default=false, Callback=function(v) S.NoMeteorDamage=v end })
+    D:AddToggle({ Name='No Moisture Damage', Key='NMoD',Default=false, Callback=function(v) S.NoMoistureDamage=v end })
+    D:AddToggle({ Name='No Tornado Damage',  Key='NTD', Default=false, Callback=function(v) S.NoTornadoDamage=v end })
 
-    local Nest = Tab:CreateSection('AUTO NEST')
-    Nest:AddDropdown({ Name='Nest Upgrade', Key='NestUpTarget',
-        Default='Normal', Values={'Normal','Premium','Royal'},
-        Callback=function(v) S.NestUpgradeTarget=v end })
-    Nest:AddToggle({ Name='Auto Nest Upgrade', Key='AutoNestUp', Default=false,
-        Tip='Collect resources to automatically upgrade your nest',
-        Callback=function(v) S.AutoNestUpgrade=v end })
-    Nest:AddToggle({ Name='Enable Auto Nest', Key='AutoNest', Default=false,
-        Tip='Create nest + invite players when eggs are available',
-        Callback=function(v) S.EnableAutoNest=v end })
-    Nest:AddDropdown({ Name='Type of Invitation', Key='InvType',
-        Default='Friends', Values={'Friends','Everyone','Trusted'},
-        Callback=function(v) S.InvitationType=v end })
-    Nest:AddToggle({ Name='Auto Accept Nest Request', Key='AutoAcceptNest', Default=false,
-        Tip='Accept any type of invitation to nest',
+    local N = Tab:CreateSection('AUTO NEST')
+    N:AddDropdown({ Name='Nest Upgrade', Key='NUT', Default='Normal',
+        Values={'Normal','Premium','Royal'}, Callback=function(v) S.NestUpgradeTarget=v end })
+    N:AddToggle({ Name='Auto Nest Upgrade', Key='ANU', Default=false, Callback=function(v) S.AutoNestUpgrade=v end })
+    N:AddToggle({ Name='Enable Auto Nest', Key='EAN', Default=false, Callback=function(v) S.EnableAutoNest=v end })
+    N:AddDropdown({ Name='Type of Invitation', Key='TOI', Default='Friends',
+        Values={'Friends','Everyone','Trusted'}, Callback=function(v) S.InvitationType=v end })
+    N:AddToggle({ Name='Auto Accept Nest Request', Key='AANR', Default=false,
         Callback=function(v) S.AutoAcceptNest=v end })
-    Nest:AddButton({ Name='Teleport To Nest',
-        Callback=function() fire('NestRequestRemote', 'TeleportToNest') end })
-    Nest:AddButton({ Name='Re-spawn Nest',
-        Callback=function() fire('NestRequestRemote', 'Respawn') end })
+    N:AddButton({ Name='Teleport To Nest', Callback=function()
+        fireOnPlayer(LP, 'NestRequestRemote', 'TeleportToNest')
+    end })
+    N:AddButton({ Name='Re-spawn Nest', Callback=function()
+        fireOnPlayer(LP, 'NestRequestRemote', 'Respawn')
+    end })
 end
 
 -- ─── Tab 2: CUSTOM STATS ────────────────────────────────────────────
 do
     local Tab = Window:CreateTab('Custom Stats', '⚔')
+    local C = Tab:CreateSection('COMBAT')
+    C:AddToggle({ Name='Auto Aggressive State', Key='AAGGR', Default=false, Callback=function(v) S.AutoAggressive=v end })
+    C:AddToggle({ Name='Auto Scared State', Key='ASC', Default=false, Callback=function(v) S.AutoScared=v end })
+    C:AddToggle({ Name='Anti Broken Leg', Key='ABL', Default=false, Callback=function(v) S.AntiBrokenLeg=v end })
+    C:AddToggle({ Name='Anti Shredded Wings', Key='ASW', Default=false, Callback=function(v) S.AntiShreddedWings=v end })
+    C:AddToggle({ Name='Anti Confusion', Key='ACO', Default=false, Callback=function(v) S.AntiConfusion=v end })
+    C:AddToggle({ Name='Anti Grab', Key='AGB', Default=false, Callback=function(v) S.AntiGrab=v end })
+    C:AddToggle({ Name='Infinite Stamina', Key='INFS', Default=false, Callback=function(v) S.InfStamina=v end })
 
-    local Combat = Tab:CreateSection('COMBAT')
-    Combat:AddToggle({ Name='Auto Aggressive State', Key='AutoAggr', Default=false,
-        Tip='Damage +25%, stamina regen -50%',
-        Callback=function(v) S.AutoAggressive=v end })
-    Combat:AddToggle({ Name='Auto Scared State', Key='AutoScared', Default=false,
-        Tip='Damage -50%, speed +25%',
-        Callback=function(v) S.AutoScared=v end })
-    Combat:AddToggle({ Name='Anti Broken Leg', Key='AntiBrokenLeg', Default=false,
-        Callback=function(v) S.AntiBrokenLeg=v end })
-    Combat:AddToggle({ Name='Anti Shredded Wings', Key='AntiShreddedWings', Default=false,
-        Callback=function(v) S.AntiShreddedWings=v end })
-    Combat:AddToggle({ Name='Anti Confusion', Key='AntiConfusion', Default=false,
-        Callback=function(v) S.AntiConfusion=v end })
-    Combat:AddToggle({ Name='Anti Grab', Key='AntiGrab', Default=false,
-        Tip='Prevent any player from grabbing you',
-        Callback=function(v) S.AntiGrab=v end })
-    Combat:AddToggle({ Name='Infinite Stamina', Key='InfStamina', Default=false,
-        Callback=function(v) S.InfStamina=v end })
-
-    local Stats = Tab:CreateSection('CUSTOM STATS')
-    Stats:AddSlider({ Name='Turn Radius', Key='TurnRadius',
-        Min=0, Max=200, Default=0, Suffix='', Decimals=0,
-        Callback=function(v) S.TurnRadius=v end })
-    Stats:AddToggle({ Name='Enable Custom Turn Radius', Key='EnableTurnRadius', Default=false,
-        Callback=function(v) S.EnableTurnRadius=v end })
-    Stats:AddSlider({ Name='Walk Speed', Key='WalkSpeed',
-        Min=0, Max=200, Default=30, Suffix='', Decimals=0,
-        Callback=function(v) S.WalkSpeed=v end })
-    Stats:AddToggle({ Name='Enable Custom Walk Speed', Key='EnableWalkSpeed', Default=false,
-        Callback=function(v) S.EnableWalkSpeed=v end })
-    Stats:AddSlider({ Name='Sprint Speed', Key='SprintSpeed',
-        Min=0, Max=300, Default=115, Suffix='', Decimals=0,
-        Callback=function(v) S.SprintSpeed=v end })
-    Stats:AddToggle({ Name='Enable Custom Sprint Speed', Key='EnableSprintSpeed', Default=false,
-        Callback=function(v) S.EnableSprintSpeed=v end })
-    Stats:AddSlider({ Name='Fly Speed', Key='FlySpeed',
-        Min=0, Max=200, Default=40, Suffix='', Decimals=0,
-        Callback=function(v) S.FlySpeed=v end })
-    Stats:AddToggle({ Name='Enable Custom Fly Speed', Key='EnableFlySpeed', Default=false,
-        Callback=function(v) S.EnableFlySpeed=v end })
+    local CS = Tab:CreateSection('CUSTOM STATS')
+    CS:AddSlider({ Name='Turn Radius', Key='TR', Min=0, Max=200, Default=0, Decimals=0, Callback=function(v) S.TurnRadius=v end })
+    CS:AddToggle({ Name='Enable Custom Turn Radius', Key='ETR', Default=false, Callback=function(v) S.EnableTurnRadius=v end })
+    CS:AddSlider({ Name='Walk Speed', Key='WS', Min=0, Max=200, Default=30, Decimals=0, Callback=function(v) S.WalkSpeed=v end })
+    CS:AddToggle({ Name='Enable Custom Walk Speed', Key='EWS', Default=false, Callback=function(v) S.EnableWalkSpeed=v end })
+    CS:AddSlider({ Name='Sprint Speed', Key='SS', Min=0, Max=300, Default=115, Decimals=0, Callback=function(v) S.SprintSpeed=v end })
+    CS:AddToggle({ Name='Enable Custom Sprint Speed', Key='ESS', Default=false, Callback=function(v) S.EnableSprintSpeed=v end })
+    CS:AddSlider({ Name='Fly Speed', Key='FS', Min=0, Max=200, Default=40, Decimals=0, Callback=function(v) S.FlySpeed=v end })
+    CS:AddToggle({ Name='Enable Custom Fly Speed', Key='EFS', Default=false, Callback=function(v) S.EnableFlySpeed=v end })
 end
 
 -- ─── Tab 3: AUTOFARM ────────────────────────────────────────────────
 do
     local Tab = Window:CreateTab('Autofarm', '⚡')
-
-    local Surv = Tab:CreateSection('SURVIVAL AUTOFARM')
-    Surv:AddToggle({ Name='Auto Eat', Key='AutoEat', Default=false,
-        Tip='Prevent your creature from starving',
-        Callback=function(v) S.AutoEat=v end })
-    Surv:AddToggle({ Name='Auto Drink', Key='AutoDrink', Default=false,
-        Tip='Prevent your creature from dying of thirst',
+    local Sv = Tab:CreateSection('SURVIVAL AUTOFARM')
+    Sv:AddToggle({ Name='Auto Eat', Key='AE', Default=false, Callback=function(v) S.AutoEat=v end })
+    Sv:AddToggle({ Name='Auto Drink', Key='AD', Default=false,
+        Tip='Note: also broken in LUNAR original — may not work',
         Callback=function(v) S.AutoDrink=v end })
-    Surv:AddToggle({ Name='Auto Mud Roll', Key='AutoMudRoll', Default=false,
-        Tip='Automatically roll on your nearest mud',
-        Callback=function(v) S.AutoMudRoll=v end })
+    Sv:AddToggle({ Name='Auto Mud Roll', Key='AMR', Default=false, Callback=function(v) S.AutoMudRoll=v end })
 
-    local Token = Tab:CreateSection('TOKEN AUTOFARM')
-    Token:AddToggle({ Name='Auto Gacha Tokens', Key='AutoGacha', Default=false,
-        Tip='Automatically collect all gacha tokens',
-        Callback=function(v) S.AutoGachaTokens=v end })
+    local T = Tab:CreateSection('TOKEN AUTOFARM')
+    T:AddToggle({ Name='Auto Gacha Tokens', Key='AGT', Default=false, Callback=function(v) S.AutoGachaTokens=v end })
 
     local MT = Tab:CreateSection('MUTATION/TRAIT AUTOFARM')
-    MT:AddLabel('Leave dropdowns empty to save any mutation/trait', Stealth and 'sub' or nil)
-    MT:AddDropdown({ Name='Mutations', Key='MutTarget',
-        Default='', Values={'','Albinism','Volcanic','Diamond','Shimmer','Overgrown','Glow Tail'},
+    MT:AddLabel('Leave dropdowns empty to save any mutation/trait')
+    MT:AddDropdown({ Name='Mutations', Key='MUT', Default='',
+        Values={'','Albinism','Volcanic','Diamond','Shimmer','Overgrown','Glow Tail'},
         Callback=function(v) S.MutationTarget=v end })
-    MT:AddToggle({ Name='Auto Mutation(s)', Key='AutoMut', Default=false,
-        Tip='Search for the selected mutation(s)',
-        Callback=function(v) S.AutoMutations=v end })
-    MT:AddDropdown({ Name='Traits', Key='TraitTarget',
-        Default='', Values={'','Damage','Speed','Bite','Health','Stamina'},
+    MT:AddToggle({ Name='Auto Mutation(s)', Key='AMUT', Default=false, Callback=function(v) S.AutoMutations=v end })
+    MT:AddDropdown({ Name='Traits', Key='TRAIT', Default='',
+        Values={'','Damage','Speed','Bite','Health','Stamina'},
         Callback=function(v) S.TraitTarget=v end })
-    MT:AddToggle({ Name='Auto Trait(s)', Key='AutoTrait', Default=false,
-        Tip='Search for the selected trait(s)',
-        Callback=function(v) S.AutoTraits=v end })
+    MT:AddToggle({ Name='Auto Trait(s)', Key='ATRAIT', Default=false, Callback=function(v) S.AutoTraits=v end })
 
-    local Mush = Tab:CreateSection('MUSH AUTOFARM')
-    Mush:AddLabel('Region Missions Status: Offline')
-    Mush:AddToggle({ Name='Auto Missions', Key='AutoMissions', Default=false,
-        Tip='Automatically completes region missions',
-        Callback=function(v) S.AutoMissions=v end })
+    local Mu = Tab:CreateSection('MUSH AUTOFARM')
+    Mu:AddLabel('Region Missions Status: Offline')
+    Mu:AddToggle({ Name='Auto Missions', Key='AMIS', Default=false, Callback=function(v) S.AutoMissions=v end })
 
-    local Rec = Tab:CreateSection('RECOMMENDED')
-    Rec:AddDropdown({ Name='Select Creature', Key='SelCreature',
-        Default='', Values={'','Common','Rare','Legendary'},
-        Callback=function(v) S.SelectedCreature=v end })
-    Rec:AddButton({ Name='Refresh Creature List',
-        Callback=function() HSHub:Notify('Creature list refreshed', 'ok', 2) end })
-    Rec:AddToggle({ Name='Auto Spawn', Key='AutoSpawn', Default=false,
-        Tip='Spawn, restart, claim death rewards automatically',
-        Callback=function(v) S.AutoSpawn=v end })
-    Rec:AddSlider({ Name='Death Points Target', Key='DPTarget',
-        Min=0, Max=5000, Default=1200, Suffix=' pts', Decimals=0,
+    local R = Tab:CreateSection('RECOMMENDED')
+    R:AddDropdown({ Name='Select Creature', Key='SCR', Default='',
+        Values={'','Slot1','Slot2','Slot3'}, Callback=function(v) S.SelectedCreature=v end })
+    R:AddButton({ Name='Refresh Creature List', Callback=function() HSHub:Notify('Creature list refreshed', 'ok', 2) end })
+    R:AddToggle({ Name='Auto Spawn', Key='ASP', Default=false, Callback=function(v) S.AutoSpawn=v end })
+    R:AddSlider({ Name='Death Points Target', Key='DPT', Min=0, Max=5000, Default=1200, Suffix=' pts', Decimals=0,
         Callback=function(v) S.DeathPointsTarget=v end })
-    Rec:AddToggle({ Name='Auto Self Kill', Key='AutoSelfKill', Default=false,
-        Tip='Kill creature when it reaches selected death points',
+    R:AddToggle({ Name='Auto Self Kill', Key='ASK', Default=false,
+        Tip='Fires LavaSelfDamage when DeathPoints >= target',
         Callback=function(v) S.AutoSelfKill=v end })
 end
 
--- ─── Tab 4: ARTIFACTS AUTOFARM ──────────────────────────────────────
+-- ─── Tab 4: ARTIFACTS (matches LUNAR Artifacts Autofarm tab) ───────
+-- 9 Warden Shrines split into Low Value (4) and High Value (5)
+local SHRINES_LOW  = { 'Hellion', 'Angelic', 'Garra', 'Verdant' }
+local SHRINES_HIGH = { 'Boreal', 'Eigion', 'Novus', 'Ardor', 'Shadow' }
+
+-- Per-shrine state flags
+S.ArtifactToggles = {}
+for _, n in ipairs(SHRINES_LOW)  do S.ArtifactToggles[n] = false end
+for _, n in ipairs(SHRINES_HIGH) do S.ArtifactToggles[n] = false end
+S.AutoServerHopArtifact = false
+
 do
     local Tab = Window:CreateTab('Artifacts', '✦')
-    local A = Tab:CreateSection('ARTIFACTS AUTOFARM')
-    A:AddLabel('Warning: Your account needs to have 20+ creatures', Stealth and 'sub' or nil)
-    A:AddButton({ Name='Check Eligibility',
-        Callback=function()
-            HSHub:Notify('Eligibility: checking creature count...', 'info', 3)
-        end })
+
+    local function makeShrineToggle(section, name)
+        local key = ('AF_%s'):format(name)
+        section:AddLabel(name .. ' Warden Shrine')
+        section:AddLabel('Status: Available  ·  Progress: 0/?',
+            Color3.fromRGB(150, 150, 180))
+        section:AddToggle({ Name=('AutoFarm %s Artifact'):format(name),
+            Key=key, Default=false,
+            Tip=('Cycle creatures and deposit at %s Warden Shrine'):format(name),
+            Callback=function(v) S.ArtifactToggles[name] = v end })
+    end
+
+    local Lo = Tab:CreateSection('LOW VALUE')
+    for _, name in ipairs(SHRINES_LOW)  do makeShrineToggle(Lo, name) end
+
+    local Hi = Tab:CreateSection('HIGH VALUE')
+    for _, name in ipairs(SHRINES_HIGH) do makeShrineToggle(Hi, name) end
+
+    local Rec = Tab:CreateSection('RECOMMEND')
+    Rec:AddToggle({ Name='Auto Server Hop', Key='ASH_Art', Default=false,
+        Tip="If the server's food runs out, hop to another",
+        Callback=function(v) S.AutoServerHopArtifact = v end })
 end
 
 -- ─── Tab 5: TELEPORTS ───────────────────────────────────────────────
@@ -2851,294 +2877,666 @@ do
     local Tab = Window:CreateTab('Teleports', '⛰')
     local Reg = Tab:CreateSection('REGION TELEPORTS')
     local regions = {
-        {'Jungle',          Vector3.new( 1500, 100,  1500)},
-        {'Algae Sandbar',   Vector3.new(-2000, 100,  1000)},
-        {'Central Rockfaces',Vector3.new(0,    200,  0)},
-        {'Swamp Hill',      Vector3.new( 2500, 150, -1000)},
-        {'Coral Reef',      Vector3.new(-1500,  50,  2500)},
-        {'Desert',          Vector3.new(-3000, 100, -1500)},
-        {'Grassy Shoal',    Vector3.new( 1000, 100, -2000)},
-        {'Rocky Drop',      Vector3.new(-2500, 300,  500)},
-        {'Redwoods',        Vector3.new( 2000, 200,  2500)},
-        {'Mountains',       Vector3.new( 0,    500, -3000)},
-        {'Tundra',          Vector3.new(-3000, 150,  3000)},
-        {'Seaweed Depths',  Vector3.new( 500, -100,  2500)},
-        {'Flower Cave',     Vector3.new(-500, -50, -500)},
-        {'Mesa',            Vector3.new( 3500, 250,  0)},
+        {'Jungle',Vector3.new(1500,100,1500)},{'Algae Sandbar',Vector3.new(-2000,100,1000)},
+        {'Central Rockfaces',Vector3.new(0,200,0)},{'Swamp Hill',Vector3.new(2500,150,-1000)},
+        {'Coral Reef',Vector3.new(-1500,50,2500)},{'Desert',Vector3.new(-3000,100,-1500)},
+        {'Grassy Shoal',Vector3.new(1000,100,-2000)},{'Rocky Drop',Vector3.new(-2500,300,500)},
+        {'Redwoods',Vector3.new(2000,200,2500)},{'Mountains',Vector3.new(0,500,-3000)},
+        {'Tundra',Vector3.new(-3000,150,3000)},{'Seaweed Depths',Vector3.new(500,-100,2500)},
+        {'Flower Cave',Vector3.new(-500,-50,-500)},{'Mesa',Vector3.new(3500,250,0)},
     }
     for _, r in ipairs(regions) do
         local name, pos = r[1], r[2]
         Reg:AddButton({ Name=name, Callback=function()
-            local c = getCreature()
-            if c and c:FindFirstChild('HumanoidRootPart') then
-                safe(function() c.HumanoidRootPart.CFrame = CFrame.new(pos) end)
-                HSHub:Notify('Teleported: ' .. name, 'ok', 2)
-            end
+            local root = getRoot()
+            if root then root.CFrame = CFrame.new(pos); HSHub:Notify('TP: ' .. name, 'ok', 2) end
         end })
     end
 
-    local Cust = Tab:CreateSection('CUSTOM TELEPORTS')
-    local customLocations = {}
-    local _customName = ''
-    Cust:AddDropdown({ Name='Custom Location', Key='CustLoc',
-        Default='', Values={''}, Callback=function(v) _customName=v end })
-    Cust:AddButton({ Name='Teleport to Location',
-        Callback=function()
-            local pos = customLocations[_customName]
-            if pos then
-                local c = getCreature()
-                if c and c:FindFirstChild('HumanoidRootPart') then
-                    c.HumanoidRootPart.CFrame = CFrame.new(pos)
-                    HSHub:Notify('Teleported to ' .. _customName, 'ok', 2)
-                end
-            else
-                HSHub:Notify('No location selected', 'warn', 2)
-            end
-        end })
-    local _saveName = ''
-    if Cust.AddTextbox then
-        Cust:AddTextbox({ Name='Location Name', Default='', Placeholder='Enter Name',
-            Callback=function(v) _saveName=v end })
+    local Cu = Tab:CreateSection('CUSTOM TELEPORTS')
+    local locs, sel = {}, ''
+    Cu:AddDropdown({ Name='Custom Location', Key='CL', Default='', Values={''}, Callback=function(v) sel=v end })
+    Cu:AddButton({ Name='Teleport to Location', Callback=function()
+        local p = locs[sel]; if p then
+            local root = getRoot(); if root then root.CFrame = CFrame.new(p); HSHub:Notify('TP: '..sel,'ok',2) end
+        end
+    end })
+    local saveName = ''
+    if Cu.AddTextbox then
+        Cu:AddTextbox({ Name='Location Name', Default='', Placeholder='Enter name',
+            Callback=function(v) saveName=v end })
     end
-    Cust:AddButton({ Name='Save Location',
-        Callback=function()
-            local c = getCreature()
-            if not c or not c:FindFirstChild('HumanoidRootPart') then return end
-            if _saveName == '' then _saveName='Loc_' .. tostring(#customLocations+1) end
-            customLocations[_saveName] = c.HumanoidRootPart.Position
-            HSHub:Notify('Saved: ' .. _saveName, 'ok', 2)
-        end })
-    Cust:AddButton({ Name='Delete Location',
-        Callback=function()
-            if _customName ~= '' then
-                customLocations[_customName]=nil
-                HSHub:Notify('Deleted: ' .. _customName, 'ok', 2)
-            end
-        end })
+    Cu:AddButton({ Name='Save Location', Callback=function()
+        local root = getRoot(); if not root then return end
+        if saveName=='' then saveName='Loc_'..tostring(#locs+1) end
+        locs[saveName]=root.Position; HSHub:Notify('Saved: '..saveName,'ok',2)
+    end })
+    Cu:AddButton({ Name='Delete Location', Callback=function()
+        if sel~='' then locs[sel]=nil; HSHub:Notify('Deleted: '..sel,'ok',2) end
+    end })
 end
 
 -- ─── Tab 6: EVENT ───────────────────────────────────────────────────
 do
     local Tab = Window:CreateTab('Event', '❄')
-    local M = Tab:CreateSection('MINIGAME(S)')
-    M:AddLabel('No active event minigames detected')
-    local I = Tab:CreateSection('INFORMATION')
-    I:AddLabel('Check Discord for event schedule')
+    Tab:CreateSection('MINIGAME(S)'):AddLabel('No active event minigames')
+    Tab:CreateSection('INFORMATION'):AddLabel('Check Discord for events')
 end
 
 -- ─── Tab 7: ESP ─────────────────────────────────────────────────────
 do
     local Tab = Window:CreateTab('Esp', '◉')
     local G = Tab:CreateSection('GACHA TOKEN ESP')
-    G:AddToggle({ Name='Explorer Gacha Token ESP', Key='EspExp', Default=false,
-        Callback=function(v) S.GachaEspExplorer=v end })
-    G:AddToggle({ Name='Galaxy Gacha Token ESP', Key='EspGal', Default=false,
-        Callback=function(v) S.GachaEspGalaxy=v end })
-    G:AddToggle({ Name='Mecha Gacha Token ESP', Key='EspMec', Default=false,
-        Callback=function(v) S.GachaEspMecha=v end })
-    G:AddToggle({ Name='Monster Gacha Token ESP', Key='EspMon', Default=false,
-        Callback=function(v) S.GachaEspMonster=v end })
-    G:AddToggle({ Name='Sweet Gacha Token ESP', Key='EspSwt', Default=false,
-        Callback=function(v) S.GachaEspSweet=v end })
+    G:AddLabel('Note: also broken in LUNAR original')
+    G:AddToggle({ Name='Explorer Gacha Token ESP', Key='EGE', Default=false, Callback=function(v) S.GachaEspExplorer=v end })
+    G:AddToggle({ Name='Galaxy Gacha Token ESP',   Key='EGG', Default=false, Callback=function(v) S.GachaEspGalaxy=v end })
+    G:AddToggle({ Name='Mecha Gacha Token ESP',    Key='EGM', Default=false, Callback=function(v) S.GachaEspMecha=v end })
+    G:AddToggle({ Name='Monster Gacha Token ESP',  Key='EGMo',Default=false, Callback=function(v) S.GachaEspMonster=v end })
+    G:AddToggle({ Name='Sweet Gacha Token ESP',    Key='EGSw',Default=false, Callback=function(v) S.GachaEspSweet=v end })
 
     local O = Tab:CreateSection('OTHERS ESP')
-    O:AddToggle({ Name='Abandoned Eggs ESP', Key='EspEggs', Default=false,
-        Callback=function(v) S.AbandonedEggsEsp=v end })
-    O:AddButton({ Name='Teleport to Abandoned Egg',
-        Callback=function() HSHub:Notify('Searching for abandoned egg...', 'info', 2) end })
+    O:AddToggle({ Name='Abandoned Eggs ESP', Key='AEE', Default=false, Callback=function(v) S.AbandonedEggsEsp=v end })
+    O:AddButton({ Name='Teleport to Abandoned Egg', Callback=function()
+        local egg = findNearestEgg()
+        if egg then
+            local part = egg:IsA('BasePart') and egg or egg:FindFirstChildWhichIsA('BasePart')
+            if part then
+                local root = getRoot()
+                if root then root.CFrame = CFrame.new(part.Position + Vector3.new(0,5,0)) end
+                HSHub:Notify('TP to abandoned egg','ok',2)
+            end
+        else
+            HSHub:Notify('No abandoned eggs','warn',2)
+        end
+    end })
 
     local P = Tab:CreateSection('PLAYER ESP')
-    P:AddToggle({ Name='Enable Player ESP', Key='EspOn', Default=false,
-        Callback=function(v) S.EnablePlayerEsp=v end })
-    P:AddLabel('Player ESP Configurations:')
-    P:AddToggle({ Name='Display Health',     Key='EspHP',   Default=false, Callback=function(v) S.EspHealth=v end })
-    P:AddToggle({ Name='Display Health Bar', Key='EspHPB',  Default=false, Callback=function(v) S.EspHealthBar=v end })
-    P:AddToggle({ Name='Display Tracer',     Key='EspTrc',  Default=false, Callback=function(v) S.EspTracer=v end })
-    P:AddToggle({ Name='Display Names',      Key='EspNm',   Default=false, Callback=function(v) S.EspNames=v end })
-    P:AddToggle({ Name='Display Distance',   Key='EspDst',  Default=false, Callback=function(v) S.EspDistance=v end })
-    P:AddToggle({ Name='Display 3D Box',     Key='EspBox',  Default=false, Callback=function(v) S.EspBox=v end })
-    P:AddToggle({ Name='Display Chameleon',  Key='EspCham', Default=false, Callback=function(v) S.EspChameleon=v end })
+    P:AddToggle({ Name='Enable Player ESP', Key='EPE', Default=false, Callback=function(v) S.EnablePlayerEsp=v end })
+    P:AddToggle({ Name='Display Health',    Key='DH',  Default=false, Callback=function(v) S.EspHealth=v end })
+    P:AddToggle({ Name='Display Health Bar',Key='DHB', Default=false, Callback=function(v) S.EspHealthBar=v end })
+    P:AddToggle({ Name='Display Tracer',    Key='DT',  Default=false, Callback=function(v) S.EspTracer=v end })
+    P:AddToggle({ Name='Display Names',     Key='DN',  Default=false, Callback=function(v) S.EspNames=v end })
+    P:AddToggle({ Name='Display Distance',  Key='DD',  Default=false, Callback=function(v) S.EspDistance=v end })
+    P:AddToggle({ Name='Display 3D Box',    Key='DB',  Default=false, Callback=function(v) S.EspBox=v end })
+    P:AddToggle({ Name='Display Chameleon', Key='DC',  Default=false, Callback=function(v) S.EspChameleon=v end })
 end
 
 -- ─── Tab 8: OTHERS ──────────────────────────────────────────────────
 do
     local Tab = Window:CreateTab('Others', '⚙')
+    local V = Tab:CreateSection('VISUAL')
+    V:AddToggle({ Name='Remove Fog', Key='RF', Default=false, Callback=function(v) S.RemoveFog=v
+        if v then Lighting.FogEnd=100000; Lighting.FogStart=100000 end end })
+    V:AddToggle({ Name='Remove Camera Effects', Key='RCE', Default=false, Callback=function(v) S.RemoveCameraEffects=v end })
+    V:AddToggle({ Name='Remove Disaster Effects', Key='RDE', Default=false, Callback=function(v) S.RemoveDisasterEffects=v end })
 
-    local Vis = Tab:CreateSection('VISUAL')
-    Vis:AddToggle({ Name='Remove Fog', Key='RmvFog', Default=false,
-        Tip='Clear the fog from the map',
-        Callback=function(v) S.RemoveFog=v
-            if v then Lighting.FogEnd = 100000 end
-        end })
-    Vis:AddToggle({ Name='Remove Camera Effects', Key='RmvCam', Default=false,
-        Tip='Removes Bleed, Necropoison, Burn, Frostbite, etc',
-        Callback=function(v) S.RemoveCameraEffects=v end })
-    Vis:AddToggle({ Name='Remove Disaster Effects', Key='RmvDis', Default=false,
-        Tip='Removes Snow, Rain, Blizzard, etc',
-        Callback=function(v) S.RemoveDisasterEffects=v end })
-
-    local Misc = Tab:CreateSection('MISC')
-    Misc:AddToggle({ Name='Hide Ping and FPS', Key='HidePF', Default=false,
-        Callback=function(v) S.HidePingFps=v end })
-    Misc:AddToggle({ Name='Anti-AFK', Key='AntiAFK', Default=false,
-        Callback=function(v) S.AntiAFK=v
-            if v and Stealth.StartAntiAFK then Stealth.StartAntiAFK() end
-        end })
-    if Misc.AddTextbox then
-        Misc:AddTextbox({ Name='Custom Name', Default='', Placeholder='Enter custom name',
-            Callback=function(v) S.CustomName=v end })
+    local Mi = Tab:CreateSection('MISC')
+    Mi:AddToggle({ Name='Hide Ping and FPS', Key='HPF', Default=false, Callback=function(v) S.HidePingFps=v end })
+    Mi:AddToggle({ Name='Anti-AFK', Key='AAFK', Default=false, Callback=function(v) S.AntiAFK=v end })
+    if Mi.AddTextbox then
+        Mi:AddTextbox({ Name='Custom Name', Default='', Placeholder='Enter name', Callback=function(v) S.CustomName=v end })
     end
-    Misc:AddToggle({ Name='Hide Username (Client-Sided)', Key='HideUser', Default=false,
-        Tip='Other users still see real name; only for screen-recording',
-        Callback=function(v) S.HideUsername=v end })
+    Mi:AddToggle({ Name='Hide Username (Client-Sided)', Key='HU', Default=false, Callback=function(v) S.HideUsername=v end })
 
     local Disc = Tab:CreateSection('DISCORD')
-    Disc:AddButton({ Name='Copy Discord Link',
-        Callback=function()
-            if setclipboard then setclipboard('https://discord.gg/5rpP6faZSJ') end
-            HSHub:Notify('Discord link copied', 'ok', 2)
-        end })
+    Disc:AddButton({ Name='Copy Discord Link', Callback=function()
+        if setclipboard then setclipboard('https://discord.gg/5rpP6faZSJ') end
+        HSHub:Notify('Discord link copied','ok',2)
+    end })
 
-    local AL = Tab:CreateSection('AUTO-LOAD')
-    local _cfgName = ''
-    if AL.AddTextbox then
-        AL:AddTextbox({ Name='Configs Name', Default='', Placeholder='Enter Name',
-            Callback=function(v) _cfgName=v end })
-    end
-    AL:AddButton({ Name='Create Config',
-        Callback=function()
-            if _cfgName=='' then HSHub:Notify('Enter a name first', 'warn', 2) return end
-            HSHub:Notify('Config "' .. _cfgName .. '" created', 'ok', 2)
-        end })
-    AL:AddDropdown({ Name='Configs List', Key='CfgList',
-        Default='', Values={''}, Callback=function(v) _cfgName=v end })
-    AL:AddButton({ Name='Save Config',
-        Callback=function() HSHub:Notify('Config saved: ' .. _cfgName, 'ok', 2) end })
-    AL:AddButton({ Name='Reset Config',
-        Callback=function() HSHub:Notify('Config reset', 'ok', 2) end })
-    AL:AddButton({ Name='Delete Config',
-        Callback=function() HSHub:Notify('Config deleted', 'ok', 2) end })
-    AL:AddButton({ Name='Set as Autoload',
-        Callback=function() HSHub:Notify('Set "' .. _cfgName .. '" as autoload', 'ok', 2) end })
+    local La = Tab:CreateSection('ANTI-LAG')
+    La:AddToggle({ Name='Low Quality Textures', Key='LQT', Default=false, Callback=function(v) S.LowQualityTextures=v
+        if v then pcall(function() settings().Rendering.QualityLevel=Enum.QualityLevel.Level01 end) end end })
+    La:AddToggle({ Name='White Screen', Key='WSC', Default=false, Callback=function(v) S.WhiteScreen=v end })
 
-    local Lag = Tab:CreateSection('ANTI-LAG')
-    Lag:AddToggle({ Name='Low Quality Textures', Key='LowQ', Default=false,
-        Callback=function(v) S.LowQualityTextures=v
-            if v then settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end
-        end })
-    Lag:AddToggle({ Name='White Screen', Key='WhiteScr', Default=false,
-        Callback=function(v) S.WhiteScreen=v end })
+    local Sr = Tab:CreateSection('SERVERS')
+    Sr:AddButton({ Name='Rejoin Server', Callback=function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP)
+    end })
+    Sr:AddButton({ Name='Server Hop', Callback=function()
+        local ok, raw = pcall(function()
+            return game:HttpGet('https://games.roblox.com/v1/games/'..tostring(game.PlaceId)
+                ..'/servers/Public?sortOrder=Asc&limit=100')
+        end)
+        if ok and raw then
+            local d = HttpService:JSONDecode(raw)
+            if d and d.data then
+                for _, s in ipairs(d.data) do
+                    if s.playing < s.maxPlayers and s.id ~= game.JobId then
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LP); return
+                    end
+                end
+            end
+        end
+        HSHub:Notify('No servers found','warn',2)
+    end })
+end
 
-    local Srv = Tab:CreateSection('SERVERS')
-    Srv:AddButton({ Name='Rejoin Server',
-        Callback=function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP) end })
-    Srv:AddButton({ Name='Server Hop',
-        Callback=function()
-            local ok, raw = pcall(function()
-                return game:HttpGet('https://games.roblox.com/v1/games/' .. tostring(game.PlaceId)
-                    .. '/servers/Public?sortOrder=Asc&limit=100')
+-- ═══════════════════════════════════════════════════════════════════
+--   FEATURE LOOPS (with ground-truth bindings)
+-- ═══════════════════════════════════════════════════════════════════
+
+-- AutoEat: TP to nearest food + spam Food:FireServer until Hunger=100%
+task.spawn(function()
+    local savedCF
+    while true do
+        task.wait(1)
+        if S.AutoEat and not S.AutoMissions then
+            pcall(function()
+                local char = getChar()
+                if char and hudStatText('Hunger') ~= '100%' then
+                    local food = findNearestFood()
+                    if food then
+                        local foodPart = food:IsA('Model') and (food.PrimaryPart or food:FindFirstChild('Food') or food:FindFirstChildWhichIsA('BasePart')) or food
+                        if foodPart and foodPart:IsA('BasePart') then
+                            local v = foodPart.Position
+                            local root = getRoot()
+                            if root then
+                                if not savedCF then savedCF = root.CFrame end
+                                root.CFrame = CFrame.new(v - Vector3.new(0,20,0))
+                                local n = 0
+                                repeat
+                                    task.wait(0.1)
+                                    fire('Food', food)
+                                    if getRoot() then getRoot().CFrame = CFrame.new(v - Vector3.new(0,20,0)) end
+                                    n = n + 1
+                                until hudStatText('Hunger') == '100%' or not S.AutoEat or not food.Parent or n > 60
+                                if savedCF and getRoot() then
+                                    getRoot().CFrame = savedCF; savedCF = nil
+                                end
+                            end
+                        end
+                    end
+                end
             end)
-            if ok and raw then
-                local data = HttpService:JSONDecode(raw)
-                if data and data.data then
-                    for _, s in ipairs(data.data) do
-                        if s.playing < s.maxPlayers and s.id ~= game.JobId then
-                            TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LP)
-                            return
+        end
+    end
+end)
+
+-- AutoDrink: noted broken in LUNAR (probably lake-detection issue)
+-- Still implemented for completeness; uses Lakes folder
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        if S.AutoDrink and not S.AutoMissions then
+            pcall(function()
+                if getChar() and hudStatText('Thirst') ~= '100%' then
+                    local lake = findNearestLake()
+                    fire('DrinkRemote', lake)
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoMudRoll: TP to nearest mud + spam Mud:FireServer until Muddy attribute
+task.spawn(function()
+    local savedCF
+    while true do
+        task.wait(0.1)
+        if S.AutoMudRoll and not S.AutoMissions then
+            pcall(function()
+                local char = getChar()
+                if char and not char:GetAttribute('Muddy') then
+                    local mud = findNearestMud()
+                    if mud then
+                        local mudPart = mud:IsA('Model') and (mud.PrimaryPart or mud:FindFirstChildWhichIsA('BasePart')) or mud
+                        if mudPart and mudPart:IsA('BasePart') then
+                            local target = mudPart.Position + Vector3.new(0, mudPart.Size.Y/2, 0)
+                            local root = getRoot()
+                            if root then
+                                if not savedCF then savedCF = root.CFrame end
+                                local n = 0
+                                repeat
+                                    task.wait(0.1)
+                                    if getRoot() then getRoot().CFrame = CFrame.new(target) end
+                                    fire('Mud', mud)
+                                    n = n + 1
+                                until char:GetAttribute('Muddy') or not S.AutoMudRoll or n > 60
+                                if savedCF and getRoot() then getRoot().CFrame = savedCF; savedCF = nil end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoShelter: Sheltered:FireServer(true) when shelter indicator is red
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if S.AutoShelter then
+            pcall(function()
+                local c = shelterColor()
+                if c and (c.R > 0.9 and c.G < 0.1 and c.B < 0.1) then
+                    fire('Sheltered', true)
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoSelfKill: fire LavaSelfDamage when DeathPoints >= target
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if S.AutoSelfKill then
+            pcall(function()
+                if getChar() then
+                    S.NoLavaDamage = false
+                    fire('LavaSelfDamage')
+                end
+            end)
+        end
+    end
+end)
+
+-- ════════════════════════════════════════════════════════════════════
+-- CREATURE CYCLING (AutoFarmMutations / AutoFarmTraits / AutoArtifactFarm)
+-- ════════════════════════════════════════════════════════════════════
+-- LUNAR pattern (chunk3_pretty line 794+ and 1655+):
+--   1. require PlayerWrapper module to get current slot
+--   2. Check if current creature matches target (mutation/trait/any)
+--   3. If not match: StoreActiveCreatureRemote + CreateSlotRemote to cycle
+--   4. Trigger HUDGui.SaveSelectionReturn(true) for UI sync
+
+local function safeRequire(path)
+    local ok, m = pcall(function() return require(path) end)
+    if ok then return m end
+end
+
+local function getPlayerWrapper()
+    local rf = ReplicatedStorage:FindFirstChild('_replicationFolder')
+    if rf then
+        local pw = rf:FindFirstChild('PlayerWrapper')
+        if pw then return safeRequire(pw) end
+    end
+end
+
+local function getHUDGuiModule()
+    local rf = ReplicatedStorage:FindFirstChild('_replicationFolder')
+    if rf then
+        local hg = rf:FindFirstChild('HUDGui')
+        if hg then return safeRequire(hg) end
+    end
+end
+
+local function getCurrentSlot()
+    local pw = getPlayerWrapper()
+    if pw and pw.GetClient then
+        local ok, client = pcall(function() return pw:GetClient() end)
+        if ok and client and client.GetCurrentSlot then
+            local ok2, slot = pcall(function() return client:GetCurrentSlot() end)
+            if ok2 then return slot end
+        end
+    end
+end
+
+local function getActiveCreature()
+    -- LUNAR's f() / z() finder — find current loaded creature in workspace
+    local char = getChar()
+    if not char then return nil end
+    -- The creature model is usually the character itself or a child
+    return char
+end
+
+local function getCreatureAttribute(creature, attr)
+    if not creature then return nil end
+    local ok, v = pcall(function() return creature:GetAttribute(attr) end)
+    if ok then return v end
+end
+
+local function creatureMatchesTarget(creature, mutTarget, traitTarget)
+    if not creature then return false end
+    if mutTarget and mutTarget ~= '' then
+        if getCreatureAttribute(creature, mutTarget) then return true end
+    end
+    if traitTarget and traitTarget ~= '' then
+        if getCreatureAttribute(creature, traitTarget) then return true end
+    end
+    return false
+end
+
+-- ════════════════════════════════════════════════════════════════════
+-- ARTIFACT SHRINE HELPERS
+-- ════════════════════════════════════════════════════════════════════
+
+-- Find the shrine model in workspace.Interactions["Warden Shrines"]
+local function findShrine(name)
+    local i = interactions(); if not i then return nil end
+    local shrines = i:FindFirstChild('Warden Shrines'); if not shrines then return nil end
+    -- Match either exact name, "<name> Warden Shrine", or substring
+    local lname = name:lower()
+    for _, s in ipairs(shrines:GetDescendants()) do
+        local sn = s.Name:lower()
+        if sn == lname or sn:find(lname, 1, true) then
+            if s:IsA('Model') or s:IsA('BasePart') then return s end
+        end
+    end
+    return nil
+end
+
+-- Get an enabled shrine (first one toggled on)
+local function getActiveShrine()
+    for _, n in ipairs(SHRINES_LOW) do
+        if S.ArtifactToggles[n] then return n, findShrine(n) end
+    end
+    for _, n in ipairs(SHRINES_HIGH) do
+        if S.ArtifactToggles[n] then return n, findShrine(n) end
+    end
+    return nil
+end
+
+-- ════════════════════════════════════════════════════════════════════
+-- MAIN CYCLING LOOP — handles AutoFarmMutations, AutoFarmTraits,
+-- AND per-shrine ArtifactFarm toggles
+-- ════════════════════════════════════════════════════════════════════
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local mutOn = S.AutoMutations
+        local trOn  = S.AutoTraits
+        local shrineName, shrineModel = getActiveShrine()
+        local artOn = shrineModel ~= nil
+
+        if artOn and shrineName and shrineModel then pcall(function()
+            -- ARTIFACT FARM V10 (MapDump-verified 2026-05-27):
+            --   - Shrines are Folders containing <Name>Tablet MeshPart (the offer spot)
+            --   - Carcass variants: "Carcass" / "Sea Carcass" / "NPC Carcass"
+            --     Use is_carcass attribute (FoodDataName contains "Carcass")
+            --   - Shrine→region mapping (loads content): e.g. Hellion → Desert
+            local root = getRoot()
+            if not root then return end
+
+            -- Step 1: find nearest carcass-type food (any of 3 variants)
+            local foodFolder = (interactions() or {}):FindFirstChild('Food')
+            local nearestCarcass, nearestDist = nil, math.huge
+            if foodFolder then
+                for _, m in ipairs(foodFolder:GetChildren()) do
+                    local isCarcass = false
+                    pcall(function()
+                        local fd = m:GetAttribute('FoodDataName')
+                        if fd and tostring(fd):find('Carcass') then isCarcass = true end
+                    end)
+                    if not isCarcass and m.Name:find('Carcass') then isCarcass = true end
+                    if isCarcass then
+                        local part = m:IsA('BasePart') and m
+                            or (m:IsA('Model') and (m.PrimaryPart or m:FindFirstChildWhichIsA('BasePart')))
+                        if part then
+                            local d = (part.Position - root.Position).Magnitude
+                            if d < nearestDist then nearestCarcass, nearestDist = m, d end
                         end
                     end
                 end
             end
-            HSHub:Notify('No servers found', 'warn', 2)
-        end })
-    Srv:AddButton({ Name='Reset Server Hop Info',
-        Callback=function() HSHub:Notify('Server hop info reset', 'ok', 2) end })
-end
 
--- ═══════════════════════════════════════════════════════════════════
---   FEATURE LOOPS
--- ═══════════════════════════════════════════════════════════════════
-local function jitter(v)
-    return v * (1 + (math.random() * 2 - 1) * S.JitterPct)
-end
-
-local _stop = false
-task.spawn(function()
-    while not _stop do
-        local c = getCreature()
-        if c then
-            -- Survival
-            if S.AutoEat then
-                local food, hunger = getAttr('Food') or 100, getAttr('Hunger') or 100
-                if food < 80 or hunger < 80 then for i=1,6 do fire('DrinkRemote') end end
-            end
-            if S.AutoDrink and (getAttr('Thirst') or 100) < 80 then fire('DrinkRemote') end
-            if S.AutoMudRoll and (getAttr('Mud') or 0) < 50 then
-                for i=1,2 do fire('DrinkRemote') end
-            end
-
-            -- State
-            if S.AutoAggressive then setAttr('Aggression', 100); fire('DrinkRemote') end
-            if S.AutoScared then setAttr('Aggression', 0) end
-            if S.AutoShelter then for i=1,3 do fire('DrinkRemote') end end
-            if S.AutoScentHidden then fire('DrinkRemote') end
-
-            -- Override
-            if S.InfStamina then setAttr('Stamina', 100); setAttr('StaminaTracker', 100) end
-            if S.NoLavaDamage then
-                local h = c:FindFirstChildOfClass('Humanoid')
-                if h and h.Health < h.MaxHealth then pcall(function() h.Health = h.MaxHealth end) end
-            end
-            if S.NoDrowningDamage then setAttr('Oxygen', 100) end
-            if S.AntiBrokenLeg then setAttr('BrokenLeg', false) end
-            if S.AntiShreddedWings then setAttr('ShreddedWings', false) end
-            if S.AntiConfusion then setAttr('Confused', false) end
-            if S.AntiGrab then setAttr('Grabbed', false) end
-            if S.AlwaysLayEffect then setAttr('Lay', true); setAttr('Age', 100) end
-
-            -- Custom stats
-            local h = c:FindFirstChildOfClass('Humanoid')
-            if h then
-                if S.EnableWalkSpeed   then h.WalkSpeed   = S.WalkSpeed   end
-                if S.EnableSprintSpeed then setAttr('SprintSpeed', S.SprintSpeed) end
-                if S.EnableFlySpeed    then setAttr('FlySpeed', S.FlySpeed) end
-            end
-
-            -- Farming
-            if S.AutoMutations then
-                for i=1,5 do invoke('RestartSlotRemote', {mutation=S.MutationTarget}) end
-            end
-            if S.AutoTraits then
-                for i=1,5 do invoke('RestartSlotRemote', {trait=S.TraitTarget}) end
-            end
-            if S.AutoMissions then for i=1,5 do fire('DrinkRemote') end end
-            if S.AutoGachaTokens then invoke('NestRequestRemote', 'GachaToken') end
-            if S.AutoNestUpgrade then
-                for i=1,3 do fire('ResourceDamageRemote') end
-                invoke('ResourceDamageRemote')
-            end
-
-            -- Lifecycle
-            if S.AutoSpawn then
-                if not c:FindFirstChild('Humanoid') or c.Humanoid.Health <= 0 then
-                    for i=1,3 do invoke('RestartSlotRemote') end
+            -- Step 2: TP to carcass + pickup (FoodPickup RemoteFunction)
+            if nearestCarcass then
+                local fpart = nearestCarcass:IsA('BasePart') and nearestCarcass
+                    or (nearestCarcass.PrimaryPart or nearestCarcass:FindFirstChildWhichIsA('BasePart'))
+                if fpart then
+                    pcall(function() root.CFrame = fpart.CFrame + Vector3.new(0, 5, 0) end)
+                    task.wait(0.4)
+                    local pickup = getRemote('FoodPickup')
+                    if pickup then
+                        pcall(function() pickup:InvokeServer(nearestCarcass) end)
+                    end
+                    task.wait(0.3)
                 end
             end
-            if S.AutoSelfKill then
-                local pts = getAttr('DeathPoints') or 0
-                if pts >= S.DeathPointsTarget and h then
-                    pcall(function() h.Health = 0 end)
+
+            -- Step 3: find shrine tablet (shrines are Folders containing <Name>Tablet MeshPart)
+            local tablet = nil
+            for _, d in ipairs(shrineModel:GetDescendants()) do
+                if d:IsA('BasePart') then
+                    -- Prefer "Tablet" named parts
+                    if d.Name:find('Tablet') then tablet = d; break end
+                    if not tablet then tablet = d end -- fallback to first BasePart
                 end
             end
-        end
 
-        -- Visual
-        if S.RemoveFog then Lighting.FogEnd = 100000 end
+            -- Step 4: TP to shrine tablet
+            if tablet then
+                local root2 = getRoot()
+                if root2 then
+                    pcall(function() root2.CFrame = tablet.CFrame + Vector3.new(0, 8, 0) end)
+                    task.wait(0.5)
+                end
+            end
 
-        task.wait(jitter(S.LoopInterval))
+            -- Step 5: Offer (WardenOffering:InvokeServer("<ShrineName>") returns true on success)
+            local wo = getRemote('WardenOffering')
+            if wo then
+                pcall(function() wo:InvokeServer(shrineName) end)
+            end
+        end) end
+
+        if mutOn or trOn then pcall(function()
+            -- Mutation/Trait farm via creature cycling
+            if not getChar() then return end
+            local slot = getCurrentSlot()
+            if not slot then return end
+            local creature = getActiveCreature()
+
+            if creatureMatchesTarget(creature, S.MutationTarget, S.TraitTarget) then
+                return
+            end
+
+            local hudMod = getHUDGuiModule()
+            if hudMod and hudMod.SaveSelectionReturn then
+                pcall(function() hudMod.SaveSelectionReturn(true) end)
+                task.wait(0.5)
+            end
+
+            local storeR = getRemote('StoreActiveCreatureRemote')
+            local createR = getRemote('CreateSlotRemote')
+            if storeR and createR then
+                pcall(function() storeR:InvokeServer(slot) end)
+                task.wait(0.5)
+                local dinoVal = creature and creature:FindFirstChild('Dino')
+                if dinoVal and dinoVal.Value then
+                    pcall(function() createR:InvokeServer(dinoVal.Value) end)
+                end
+            end
+        end) end
     end
 end)
 
--- ═══════════════════════════════════════════════════════════════════
-HSHub:Notify('HS Hub loaded · Creatures of Sonaria · HS-COS-V2', 'ok', 3)
+-- Auto Server Hop (Artifacts tab Recommend) — same as Others tab Server Hop
+task.spawn(function()
+    while true do
+        task.wait(30)
+        if S.AutoServerHopArtifact then
+            pcall(function()
+                local ok, raw = pcall(function()
+                    return game:HttpGet('https://games.roblox.com/v1/games/'..tostring(game.PlaceId)
+                        ..'/servers/Public?sortOrder=Asc&limit=100')
+                end)
+                if ok and raw then
+                    local d = HttpService:JSONDecode(raw)
+                    if d and d.data then
+                        for _, srv in ipairs(d.data) do
+                            if srv.playing < srv.maxPlayers and srv.id ~= game.JobId then
+                                TeleportService:TeleportToPlaceInstance(game.PlaceId, srv.id, LP)
+                                return
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoSpawn: respawn dead creature
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if S.AutoSpawn then
+            pcall(function()
+                if not getChar() then
+                    local slot = S.SelectedCreature
+                    if slot ~= '' then
+                        invoke('RestartSlotRemote', slot, false)
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoGachaTokens: GetSpawnedTokenRemote:InvokeServer() — periodic pickup
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if S.AutoGachaTokens then
+            pcall(function() invoke('GetSpawnedTokenRemote') end)
+        end
+    end
+end)
+
+-- AutoAcceptNest: loop other players, fire AcceptRequest on their Remotes folder
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if S.AutoAcceptNest then
+            pcall(function()
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= LP and p:FindFirstChild('Settings') then
+                        local n = p.Settings:FindFirstChild('Nesting')
+                        if n and (n.Value == S.InvitationType or S.InvitationType == 'Everyone') then
+                            fireOnPlayer(p, 'NestRequestRemote', 'AcceptRequest')
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoNestUpgrade: ResourceDamageRemote + UpgradeNest
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if S.AutoNestUpgrade then
+            pcall(function()
+                for i = 1, 3 do fire('ResourceDamageRemote') end
+                invoke('UpgradeNest', S.NestUpgradeTarget)
+            end)
+        end
+    end
+end)
+
+-- AlwaysLayEffect: Lay:FireServer(true)  (chunk3 line 987)
+-- Pattern: while AlwaysLayEffect and task.wait(1) do; Lay:FireServer(unpack({[1]=true})); end
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if S.AlwaysLayEffect then
+            pcall(function() fire('Lay', true) end)
+        end
+    end
+end)
+
+-- AutoAggression: StateAilment:FireServer("Aggression")  (chunk3 line 5386)
+-- Pattern: only fire when creature doesn't already have Aggression attribute
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if S.AutoAggressive then
+            pcall(function()
+                local c = getChar()
+                if c and not c:GetAttribute('Aggression') then
+                    fire('StateAilment', 'Aggression')
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoScentHidden: HideScent:FireServer()  (chunk3 line 5303)
+-- Pattern: only fire when char doesn't already have HideScent attribute
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if S.AutoScentHidden then
+            pcall(function()
+                local c = getChar()
+                if c and not c:GetAttribute('HideScent') then
+                    fire('HideScent')
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoCowerState: StateAilment:FireServer("Cower")  (chunk3 m=function line 1534)
+-- Pattern: only fire when creature doesn't already have Cower attribute
+S.AutoCowerStateValue = false  -- ensure flag exists
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if S.AutoCowerStateValue then
+            pcall(function()
+                local c = getChar()
+                if c and not c:GetAttribute('Cower') then
+                    fire('StateAilment', 'Cower')
+                end
+            end)
+        end
+    end
+end)
+
+-- AutoNestValue: TP + Nest:FireServer when Age > 66  (chunk3 line 1002)
+S.AutoNestValue = false
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if S.AutoNestValue then
+            pcall(function()
+                local c = getChar()
+                if not c or not c:FindFirstChild('HumanoidRootPart') then return end
+                local age = c:GetAttribute('Age') or 0
+                if age <= 66 then return end
+                local pos = c.HumanoidRootPart.Position
+                local nests = Workspace:FindFirstChild('Interactions')
+                nests = nests and nests:FindFirstChild('Nests')
+                if not nests or not nests:FindFirstChild(LP.Name) then
+                    fire('Nest', { pos, Vector3.yAxis })
+                end
+            end)
+        end
+    end
+end)
+
+-- Custom stats apply
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local h = getHumanoid()
+        if h then
+            if S.EnableWalkSpeed then h.WalkSpeed = S.WalkSpeed end
+            if S.InfStamina then
+                pcall(function()
+                    local c = getChar()
+                    if c then c:SetAttribute('Stamina', 100); c:SetAttribute('StaminaTracker', 100) end
+                end)
+            end
+        end
+    end
+end)
+
+-- Visual loops
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if S.RemoveFog then
+            Lighting.FogEnd = 100000; Lighting.FogStart = 100000
+        end
+    end
+end)
+
+HSHub:Notify('HS Hub loaded · Creatures of Sonaria · HS-COS-V4', 'ok', 3)
 
