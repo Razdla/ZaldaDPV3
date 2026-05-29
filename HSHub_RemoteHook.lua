@@ -85,10 +85,15 @@ local function dumpArgs(args, n)
     return table.concat(parts, ', ')
 end
 
--- ═════════════ INSTALL HOOKS ══════════════════════════════════════
+-- ═════════════ INSTALL HOOKS (v2: hook-once, dispatch-by-self) ════
+-- BUG FIX 2026-05-27: previous version hooked r.FireServer per-instance,
+-- but that's the GLOBAL class method. Caused all hooks to chain on one
+-- real call, logging it with N different remote names. v2 hooks the
+-- class method ONCE and dispatches by self.Name lookup.
 local rs_remotes = RS:FindFirstChild('Remotes')
+local TARGET_SET = {}; for _, n in ipairs(TARGETS) do TARGET_SET[n] = true end
 
-local function record(name, method, args, n, retval, retCount)
+local function record(name, method, args, n, results)
     if not CAPTURE_ACTIVE then return end
     local entry = {
         t = tick() - START_TIME,
@@ -96,53 +101,82 @@ local function record(name, method, args, n, retval, retCount)
         method = method,
         args = dumpArgs(args, n),
     }
-    if retval ~= nil then
-        local rets = {retval}; for i = 2, retCount or 1 do rets[i] = select(i, table.unpack({retval})) end
-        entry.returned = dumpArgs(rets, retCount or 1)
+    if results and results.n and results.n > 0 then
+        entry.returned = dumpArgs(results, results.n)
     end
     table.insert(CAPTURES, entry)
 end
 
-local function installHookForRemote(name)
-    if not rs_remotes then return false, 'no RS.Remotes' end
-    local r = rs_remotes:FindFirstChild(name)
-    if not r then return false, 'remote not found' end
-    if not hookfunction then return false, 'no hookfunction in executor' end
-
-    if r:IsA('RemoteEvent') then
-        local orig
-        local ok, err = pcall(function()
-            orig = hookfunction(r.FireServer, function(self, ...)
-                local args = table.pack(...)
-                record(name, 'FireServer', args, args.n)
-                return orig(self, ...)
-            end)
-        end)
-        if not ok then return false, tostring(err):sub(1, 80) end
-        return true
-    elseif r:IsA('RemoteFunction') then
-        local orig
-        local ok, err = pcall(function()
-            orig = hookfunction(r.InvokeServer, function(self, ...)
-                local args = table.pack(...)
-                local results = table.pack(orig(self, ...))
-                record(name, 'InvokeServer', args, args.n, results[1], results.n)
-                return table.unpack(results, 1, results.n)
-            end)
-        end)
-        if not ok then return false, tostring(err):sub(1, 80) end
-        return true
-    else
-        return false, 'unsupported class: ' .. r.ClassName
+if not hookfunction then
+    for _, n in ipairs(TARGETS) do HOOKS_FAIL[n] = 'no hookfunction' end
+else
+    -- Find a sample RemoteEvent + RemoteFunction to get the class methods
+    local sampleEvent, sampleFn
+    if rs_remotes then
+        for _, c in ipairs(rs_remotes:GetChildren()) do
+            if c:IsA('RemoteEvent') and not sampleEvent then sampleEvent = c end
+            if c:IsA('RemoteFunction') and not sampleFn then sampleFn = c end
+            if sampleEvent and sampleFn then break end
+        end
     end
-end
 
-for _, name in ipairs(TARGETS) do
-    local ok, err = installHookForRemote(name)
-    if ok then
-        HOOKS_OK[name] = true
-    else
-        HOOKS_FAIL[name] = err
+    -- Hook FireServer once
+    if sampleEvent then
+        local origFire
+        local ok, err = pcall(function()
+            origFire = hookfunction(sampleEvent.FireServer, function(self, ...)
+                if CAPTURE_ACTIVE and TARGET_SET[self.Name] then
+                    local args = table.pack(...)
+                    record(self.Name, 'FireServer', args, args.n)
+                end
+                return origFire(self, ...)
+            end)
+        end)
+        if ok then
+            for _, n in ipairs(TARGETS) do
+                local r = rs_remotes and rs_remotes:FindFirstChild(n)
+                if r and r:IsA('RemoteEvent') then HOOKS_OK[n] = true end
+            end
+        else
+            for _, n in ipairs(TARGETS) do
+                local r = rs_remotes and rs_remotes:FindFirstChild(n)
+                if r and r:IsA('RemoteEvent') then HOOKS_FAIL[n] = tostring(err):sub(1, 80) end
+            end
+        end
+    end
+
+    -- Hook InvokeServer once
+    if sampleFn then
+        local origInvoke
+        local ok, err = pcall(function()
+            origInvoke = hookfunction(sampleFn.InvokeServer, function(self, ...)
+                if CAPTURE_ACTIVE and TARGET_SET[self.Name] then
+                    local args = table.pack(...)
+                    local results = table.pack(origInvoke(self, ...))
+                    record(self.Name, 'InvokeServer', args, args.n, results)
+                    return table.unpack(results, 1, results.n)
+                end
+                return origInvoke(self, ...)
+            end)
+        end)
+        if ok then
+            for _, n in ipairs(TARGETS) do
+                local r = rs_remotes and rs_remotes:FindFirstChild(n)
+                if r and r:IsA('RemoteFunction') then HOOKS_OK[n] = true end
+            end
+        else
+            for _, n in ipairs(TARGETS) do
+                local r = rs_remotes and rs_remotes:FindFirstChild(n)
+                if r and r:IsA('RemoteFunction') then HOOKS_FAIL[n] = tostring(err):sub(1, 80) end
+            end
+        end
+    end
+
+    -- Mark missing remotes
+    for _, n in ipairs(TARGETS) do
+        if not HOOKS_OK[n] and not HOOKS_FAIL[n] then
+            HOOKS_FAIL[n] = 'remote not found in RS.Remotes'
+        end
     end
 end
 
