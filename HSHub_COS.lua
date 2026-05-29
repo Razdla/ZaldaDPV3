@@ -7,7 +7,7 @@
 
     Game     : Creatures of Sonaria  (Roblox creature survival)
     Build    : HS-COS-V4
-    Bundled  : 2026-05-27
+    Bundled  : 2026-05-29
     Library  : HSHub_UI v1.0.0
 
     This is a BUNDLED file. Do not edit directly — instead edit
@@ -3511,22 +3511,140 @@ task.spawn(function()
     end
 end)
 
--- Custom stats apply
+-- ════════════════════════════════════════════════════════════════════
+-- PHASE 2 V13: Custom Stats (AttrDump-verified 2026-05-27)
+-- Real attribute names on Character.Data folder (mangled single letters):
+--   's'  = Walk Speed   (default ~31)
+--   'ss' = Sprint Speed (default ~105, LUNAR shows 115)
+--   'fs' = Fly Speed    (default ~39, LUNAR shows 40)
+--   'tr' = Turn Radius  (default 1)
+-- Location: Workspace.Characters.<player>.Data folder, ALSO mirrored on
+-- Character itself (game reads from one, server reads from other).
+-- Strategy: set on BOTH Character + Character.Data every frame.
+-- ════════════════════════════════════════════════════════════════════
+
+local function setStatAttr(char, key, value)
+    if not char then return end
+    pcall(function() char:SetAttribute(key, value) end)
+    local data = char:FindFirstChild('Data')
+    if data then
+        pcall(function() data:SetAttribute(key, value) end)
+    end
+end
+
 task.spawn(function()
     while true do
-        task.wait(0.5)
-        local h = getHumanoid()
-        if h then
-            if S.EnableWalkSpeed then h.WalkSpeed = S.WalkSpeed end
-            if S.InfStamina then
-                pcall(function()
-                    local c = getChar()
-                    if c then c:SetAttribute('Stamina', 100); c:SetAttribute('StaminaTracker', 100) end
-                end)
+        task.wait()  -- every frame
+        local c = getChar()
+        if c then
+            if S.EnableWalkSpeed   then setStatAttr(c, 's',  S.WalkSpeed) end
+            if S.EnableSprintSpeed then setStatAttr(c, 'ss', S.SprintSpeed) end
+            if S.EnableFlySpeed    then setStatAttr(c, 'fs', S.FlySpeed) end
+            if S.EnableTurnRadius  then setStatAttr(c, 'tr', S.TurnRadius) end
+            -- Backup: Humanoid.WalkSpeed (some games combine attribute + Humanoid)
+            if S.EnableWalkSpeed then
+                local h = c:FindFirstChildOfClass('Humanoid')
+                if h then pcall(function() h.WalkSpeed = S.WalkSpeed end) end
             end
         end
     end
 end)
+
+-- ════════════════════════════════════════════════════════════════════
+-- PHASE 1: Infinite Stamina (chunk3 line 902-915 verified pattern)
+-- Real attribute names: 'st' (stamina) and 'sr' (stamina regen)
+-- Value: 10000 (NOT 100)
+-- Hook AttributeChanged('st') to keep at 10000 even when server tries reset
+-- ════════════════════════════════════════════════════════════════════
+local _infStaminaHookedChar = nil
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        if S.InfStamina then
+            pcall(function()
+                local c = getChar()
+                if not c then return end
+                local hasSt = c:GetAttribute('st') ~= nil
+                local hasSr = c:GetAttribute('sr') ~= nil
+
+                if hasSt and hasSr then
+                    -- Path A: creature has st/sr attributes
+                    pcall(function() c:SetAttribute('sr', 10000) end)
+                    pcall(function() c:SetAttribute('st', 10000) end)
+                    -- One-shot hook to keep value when server resets
+                    if _infStaminaHookedChar ~= c then
+                        _infStaminaHookedChar = c
+                        pcall(function()
+                            c:GetAttributeChangedSignal('st'):Connect(function()
+                                if S.InfStamina and c.Parent then
+                                    pcall(function() c:SetAttribute('sr', 10000) end)
+                                    pcall(function() c:SetAttribute('st', 10000) end)
+                                end
+                            end)
+                        end)
+                    end
+                else
+                    -- Path B: fallback via PlayerWrapper:GetCurrentCharacter()
+                    local pw = getPlayerWrapper()
+                    if pw and pw.GetClient then
+                        pcall(function()
+                            local client = pw:GetClient()
+                            if client and client.GetCurrentCharacter then
+                                local ch = client:GetCurrentCharacter()
+                                if ch and ch.StaminaTracker then
+                                    ch.StaminaTracker.Stamina = ch.StaminaTracker:GetMaxStamina()
+                                end
+                            end
+                        end)
+                    end
+                end
+            end)
+        else
+            _infStaminaHookedChar = nil
+        end
+    end
+end)
+
+-- Reset hook tracker on character respawn
+LP.CharacterAdded:Connect(function() _infStaminaHookedChar = nil end)
+
+-- ════════════════════════════════════════════════════════════════════
+-- PHASE 3: No Damage via remote-block (RemoteHook-verified 2026-05-29)
+-- CoS is client-authoritative for environmental damage: the CLIENT fires
+-- a remote to hurt ITSELF. e.g. LavaSelfDamage:FireServer() in lava.
+-- (Confirmed: HSHub_RemoteHook capture, hooks_ok includes "LavaSelfDamage".)
+--
+-- Uses the shared Stealth namecall hook: register a handler that DROPS
+-- FireServer when self.Name is in BLOCK and its toggle is on. Stealth's
+-- dispatcher already guards checkcaller() (our own fire() helper passes
+-- through) and a non-nil return short-circuits the real call = blocked.
+--
+-- EXTEND LATER: when we capture Drowning/Meteor/Moisture/Tornado remotes,
+-- just add rows to BLOCK below — no other change needed.
+-- ════════════════════════════════════════════════════════════════════
+do
+    local BLOCK = {
+        LavaSelfDamage = function() return S.NoLavaDamage end,
+        -- Drowning  = function() return S.NoDrowningDamage end,   -- TODO: capture remote name
+        -- Meteor    = function() return S.NoMeteorDamage end,     -- TODO
+        -- Moisture  = function() return S.NoMoistureDamage end,   -- TODO
+        -- Tornado   = function() return S.NoTornadoDamage end,    -- TODO
+    }
+    pcall(function()
+        if not (Stealth and Stealth.RegisterNamecall and Stealth.InstallNamecallHook) then return end
+        Stealth.RegisterNamecall('HSHub_NoDamage', function(self, method, _args)
+            if method ~= 'FireServer' then return nil end
+            local ok, nm = pcall(function() return self.Name end)
+            if not ok then return nil end
+            local pred = BLOCK[nm]
+            if pred and pred() == true then
+                return false   -- non-nil => Stealth short-circuits; real FireServer never runs
+            end
+            return nil          -- pass through to the real namecall
+        end)
+        Stealth.InstallNamecallHook()   -- idempotent (guarded by _nchooked)
+    end)
+end
 
 -- Visual loops
 task.spawn(function()
