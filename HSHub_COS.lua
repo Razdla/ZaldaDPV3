@@ -3624,11 +3624,16 @@ LP.CharacterAdded:Connect(function() _infStaminaHookedChar = nil end)
 -- ════════════════════════════════════════════════════════════════════
 do
     local BLOCK = {
+        -- Lava: LavaSelfDamage:FireServer() ~1/s, ~95 dmg/tick (DamageSpy-verified)
         LavaSelfDamage = function() return S.NoLavaDamage end,
-        -- Drowning  = function() return S.NoDrowningDamage end,   -- TODO: capture remote name
-        -- Meteor    = function() return S.NoMeteorDamage end,     -- TODO
-        -- Moisture  = function() return S.NoMoistureDamage end,   -- TODO
-        -- Tornado   = function() return S.NoTornadoDamage end,    -- TODO
+        -- Drowning: 2 client-auth self-damage remotes fire ~1/s while suffocating
+        --   OxygenRemote ~22 dmg/tick (starts the damage), DrownRemote ~7 dmg/tick.
+        --   Both verified by DamageSpy 2026-05-29 (health 'h' drop 0.07s after each fire).
+        OxygenRemote   = function() return S.NoDrowningDamage end,
+        DrownRemote    = function() return S.NoDrowningDamage end,
+        -- Meteor    = function() return S.NoMeteorDamage end,     -- TODO: capture remote
+        -- Moisture  = function() return S.NoMoistureDamage end,   -- TODO: capture remote
+        -- Tornado   = function() return S.NoTornadoDamage end,    -- TODO: capture remote
     }
     pcall(function()
         if not (Stealth and Stealth.RegisterNamecall and Stealth.InstallNamecallHook) then return end
