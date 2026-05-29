@@ -3635,19 +3635,35 @@ do
         -- Moisture  = function() return S.NoMoistureDamage end,   -- TODO: capture remote
         -- Tornado   = function() return S.NoTornadoDamage end,    -- TODO: capture remote
     }
+    -- MECHANISM: hookfunction on FireServer (NOT __namecall).
+    -- DamageSpy PROVED hookfunction(remote.FireServer,...) intercepts these exact
+    -- remotes; the old __namecall hook missed them because CoS fires the damage
+    -- remotes via a wrapper/dot-call (FireServer(remote,...)), not obj:FireServer()
+    -- colon-syntax. hookfunction on the FireServer C-closure catches BOTH styles.
     pcall(function()
-        if not (Stealth and Stealth.RegisterNamecall and Stealth.InstallNamecallHook) then return end
-        Stealth.RegisterNamecall('HSHub_NoDamage', function(self, method, _args)
-            if method ~= 'FireServer' then return nil end
-            local ok, nm = pcall(function() return self.Name end)
-            if not ok then return nil end
-            local pred = BLOCK[nm]
-            if pred and pred() == true then
-                return false   -- non-nil => Stealth short-circuits; real FireServer never runs
+        local hookfn = (Stealth and Stealth.hookfunction) or hookfunction
+        if not hookfn then return end
+        -- any RemoteEvent works: FireServer is one shared C-closure for all of them
+        local sample
+        for _, d in ipairs(game:GetService('ReplicatedStorage'):GetDescendants()) do
+            if d:IsA('RemoteEvent') then sample = d; break end
+        end
+        if not sample then return end
+        local ccaller = (Stealth and Stealth.checkcaller) or function() return false end
+        local orig
+        orig = hookfn(sample.FireServer, function(self, ...)
+            -- skip our own fires (executor thread) so we never block HSHub itself
+            if not ccaller() then
+                local ok, nm = pcall(function() return self.Name end)
+                if ok then
+                    local pred = BLOCK[nm]
+                    if pred and pred() == true then
+                        return   -- swallow → server never receives the self-damage
+                    end
+                end
             end
-            return nil          -- pass through to the real namecall
+            return orig(self, ...)
         end)
-        Stealth.InstallNamecallHook()   -- idempotent (guarded by _nchooked)
     end)
 end
 
