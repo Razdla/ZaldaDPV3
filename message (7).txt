@@ -1,0 +1,367 @@
+-- LuaShield Debug Wrapper
+local function _ls_showErr(e)
+    pcall(function()
+        local p
+        pcall(function()
+            local ok, cg = pcall(game.GetService, game, "CoreGui")
+            p = ok and cg or nil
+        end)
+        if not p then
+            local lp = game:GetService("Players").LocalPlayer
+            p = lp:WaitForChild("PlayerGui", 5)
+        end
+        if not p then return end
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "LSDebugErr"
+        sg.ResetOnSpawn = false
+        sg.DisplayOrder = 99999
+        local bg = Instance.new("Frame", sg)
+        bg.Size = UDim2.new(1, 0, 0, 180)
+        bg.Position = UDim2.new(0, 0, 0, 0)
+        bg.BackgroundColor3 = Color3.fromRGB(20, 0, 0)
+        bg.BorderSizePixel = 0
+        local lbl = Instance.new("TextLabel", bg)
+        lbl.Size = UDim2.new(1, -16, 1, -12)
+        lbl.Position = UDim2.new(0, 8, 0, 6)
+        lbl.TextWrapped = true
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextYAlignment = Enum.TextYAlignment.Top
+        lbl.Text = "LuaShield VM Error:\n" .. tostring(e)
+        lbl.TextColor3 = Color3.fromRGB(255, 130, 130)
+        lbl.BackgroundTransparency = 1
+        lbl.TextSize = 13
+        lbl.Font = Enum.Font.Code
+        sg.Parent = p
+    end)
+end
+
+local _ok, _err = xpcall(function()
+
+
+local R0 = (function()
+  local vkHRp = {}
+  
+  
+  
+  local YP = _ENV or (getfenv and getfenv()) or _G or {}
+  
+  vkHRp.print = print vkHRp.type = type vkHRp.pairs = pairs vkHRp.ipairs = ipairs
+  vkHRp.next = next vkHRp.select = select vkHRp.pcall = pcall vkHRp.xpcall = xpcall
+  vkHRp.error = error vkHRp.tostring = tostring vkHRp.tonumber = tonumber
+  vkHRp.rawget = rawget vkHRp.rawset = rawset vkHRp.rawequal = rawequal vkHRp.rawlen = rawlen
+  vkHRp.setmetatable = setmetatable vkHRp.getmetatable = getmetatable
+  vkHRp.require = require vkHRp.assert = assert
+  vkHRp.table = table vkHRp.string = string vkHRp.math = math
+  vkHRp.coroutine = coroutine vkHRp.io = io vkHRp.os = os
+  
+  
+  local function j2(ztBQ2)
+    local NHIg9, SrBEA = pcall(function() return YP[ztBQ2] end)
+    if NHIg9 and SrBEA ~= nil then vkHRp[ztBQ2] = SrBEA end
+  end
+  j2("game") j2("workspace") j2("script")
+  j2("task") j2("wait") j2("spawn") j2("delay") j2("tick")
+  j2("warn") j2("typeof") j2("loadstring")
+  j2("shared") j2("settings") j2("stats")
+  j2("Vector2") j2("Vector3") j2("CFrame")
+  j2("Color3") j2("BrickColor") j2("UDim") j2("UDim2")
+  j2("Enum") j2("Instance") j2("Ray") j2("Region3")
+  j2("NumberRange") j2("TweenInfo")
+  j2("ColorSequence") j2("ColorSequenceKeypoint")
+  j2("NumberSequence") j2("NumberSequenceKeypoint")
+  j2("PhysicalProperties") j2("Random") j2("DateTime")
+  j2("Faces") j2("Axes") j2("RaycastParams") j2("OverlapParams")
+  j2("_G") j2("_VERSION")
+  
+  
+  
+  setmetatable(vkHRp, { ["__index"] = function(CMc, c9Xp)
+    local sJ, oQ = pcall(function() return YP[c9Xp] end)
+    if sJ and oQ ~= nil then return oQ end
+    if _G then
+      local cGXs, jjku_ = pcall(function() return _G[c9Xp] end)
+      if cGXs then return jjku_ end
+    end
+    return nil
+  end })
+  return vkHRp
+end)()
+local function es(yla07, Ud3, ...)
+  local SRq8 = {}
+  local UL1wp = 1
+  local _Uf = yla07[1]
+  local jOIY2 = yla07[2]
+  local ehG = yla07[3]
+  local kas_q = Ud3 or {}
+  local R5NB = -1
+  local function h1rC8(VX61m) if VX61m >= 256 then return jOIY2[VX61m - 255] end return SRq8[VX61m] end
+  local EaQ = select("#", ...)
+  for N4 = 1, EaQ do SRq8[N4 - 1] = select(N4, ...) end
+  while true do
+    local AB7 = _Uf[UL1wp]
+    local DY = AB7[1]
+    local WA69C = AB7[2]
+    local Q0i = AB7[3]
+    local g2 = AB7[4]
+    UL1wp = UL1wp + 1
+    if DY == 26 then
+      SRq8[WA69C] = {}
+    elseif DY == 20 then
+      if Q0i == 0 then
+        local vsR = select("#", ...)
+        for Yxa = 0, vsR - 1 do SRq8[WA69C + Yxa] = select(Yxa + 1, ...) end
+        R5NB = WA69C + vsR - 1
+      else
+        for Yxa = 0, Q0i - 2 do SRq8[WA69C + Yxa] = select(Yxa + 1, ...) end
+      end
+    elseif DY == 9 then
+      if (not not SRq8[WA69C]) ~= (g2 ~= 0) then UL1wp = UL1wp + 1 end
+    elseif DY == 11 then
+      SRq8[WA69C] = SRq8[Q0i][h1rC8(g2)]
+    elseif DY == 10 then
+      local VzBz = {}
+      for Yxa = Q0i, g2 do VzBz[#VzBz + 1] = tostring(SRq8[Yxa]) end
+      SRq8[WA69C] = table.concat(VzBz)
+    elseif DY == 2 then
+      SRq8[WA69C] = kas_q[Q0i + 1][1]
+    elseif DY == 3 then
+      local bS = SRq8[Q0i]
+      SRq8[WA69C + 1] = bS
+      SRq8[WA69C] = bS[h1rC8(g2)]
+    elseif DY == 22 then
+      kas_q[Q0i + 1][1] = SRq8[WA69C]
+    elseif DY == 34 then
+      if (h1rC8(Q0i) < h1rC8(g2)) ~= (WA69C ~= 0) then UL1wp = UL1wp + 1 end
+    elseif DY == 23 then
+      SRq8[WA69C] = h1rC8(Q0i) % h1rC8(g2)
+    elseif DY == 17 then
+      if (not not SRq8[Q0i]) ~= (g2 ~= 0) then
+        UL1wp = UL1wp + 1
+      else
+        SRq8[WA69C] = SRq8[Q0i]
+      end
+    elseif DY == 36 then
+      local a4nj = SRq8[WA69C]
+      local CA = {}
+      for Yxa = 1, Q0i - 1 do CA[Yxa] = SRq8[WA69C + Yxa] end
+      return a4nj(table.unpack(CA))
+    elseif DY == 29 then
+      local G2XHo = ehG[Q0i + 1]
+      local M28 = {}
+      local Cvj = G2XHo[6]
+      for Yxa = 1, #Cvj do
+        local NfeKq = Cvj[Yxa]
+        if NfeKq[1] == 1 then
+          if NfeKq[3] == 1 then
+            M28[Yxa] = SRq8[NfeKq[2]]
+          else
+            M28[Yxa] = {SRq8[NfeKq[2]]}
+          end
+        else
+          M28[Yxa] = kas_q[NfeKq[2] + 1]
+        end
+      end
+      SRq8[WA69C] = function(...)
+        return es(G2XHo, M28, ...)
+      end
+    elseif DY == 31 then
+      SRq8[WA69C] = jOIY2[Q0i + 1]
+    elseif DY == 16 then
+      SRq8[WA69C] = #SRq8[Q0i]
+    elseif DY == 15 then
+      SRq8[WA69C] = SRq8[WA69C] + SRq8[WA69C + 2]
+      if (SRq8[WA69C + 2] > 0 and SRq8[WA69C] <= SRq8[WA69C + 1]) or
+         (SRq8[WA69C + 2] < 0 and SRq8[WA69C] >= SRq8[WA69C + 1]) then
+        SRq8[WA69C + 3] = SRq8[WA69C]
+        UL1wp = UL1wp + Q0i
+      end
+    elseif DY == 28 then
+      SRq8[WA69C] = SRq8[Q0i]
+    elseif DY == 7 then
+      SRq8[WA69C] = h1rC8(Q0i) * h1rC8(g2)
+    elseif DY == 39 then
+      R0[jOIY2[Q0i + 1]] = SRq8[WA69C]
+    elseif DY == 12 then
+      for Yxa = WA69C, Q0i do SRq8[Yxa] = nil end
+    elseif DY == 0 then
+      SRq8[WA69C] = -SRq8[Q0i]
+    elseif DY == 19 then
+      SRq8[WA69C] = {SRq8[WA69C]}
+    elseif DY == 40 then
+      local wRBq = SRq8[WA69C]
+      local zYt = SRq8[WA69C + 1]
+      local fH = SRq8[WA69C + 2]
+      local oiG = table.pack(wRBq(zYt, fH))
+      for Yxa = 0, g2 - 1 do SRq8[WA69C + 3 + Yxa] = oiG[Yxa + 1] end
+      if SRq8[WA69C + 3] ~= nil then
+        SRq8[WA69C + 2] = SRq8[WA69C + 3]
+      else
+        UL1wp = UL1wp + 1
+      end
+    elseif DY == 21 then
+      SRq8[WA69C] = h1rC8(Q0i) ^ h1rC8(g2)
+    elseif DY == 4 then
+      if (h1rC8(Q0i) <= h1rC8(g2)) ~= (WA69C ~= 0) then UL1wp = UL1wp + 1 end
+    elseif DY == 14 then
+      SRq8[WA69C][1] = SRq8[Q0i]
+    elseif DY == 32 then
+      SRq8[WA69C] = h1rC8(Q0i) - h1rC8(g2)
+    elseif DY == 13 then
+      SRq8[WA69C][h1rC8(Q0i)] = h1rC8(g2)
+    elseif DY == 1 then
+      SRq8[WA69C] = Q0i ~= 0
+      if g2 ~= 0 then UL1wp = UL1wp + 1 end
+    elseif DY == 5 then
+      SRq8[WA69C] = not SRq8[Q0i]
+    elseif DY == 6 then
+      SRq8[WA69C] = SRq8[Q0i][1]
+    elseif DY == 27 then
+      local a0 = SRq8[WA69C]
+      local jVtC = (g2 - 1) * 50
+      local Mgz = Q0i
+      if Q0i == 0 then Mgz = R5NB - WA69C end
+      for Yxa = 1, Mgz do a0[jVtC + Yxa] = SRq8[WA69C + Yxa] end
+    elseif DY == 24 then
+      if (h1rC8(Q0i) == h1rC8(g2)) ~= (WA69C ~= 0) then UL1wp = UL1wp + 1 end
+    elseif DY == 25 then
+      SRq8[WA69C] = h1rC8(Q0i) / h1rC8(g2)
+    elseif DY == 37 then
+      local a4nj = SRq8[WA69C]
+      local Mgz
+      if Q0i == 0 then Mgz = R5NB - WA69C else Mgz = Q0i - 1 end
+      local CA = {}
+      for Yxa = 1, Mgz do CA[Yxa] = SRq8[WA69C + Yxa] end
+      local jO = table.pack(a4nj(table.unpack(CA, 1, Mgz)))
+      if g2 == 0 then
+        for Yxa = 0, jO.n - 1 do SRq8[WA69C + Yxa] = jO[Yxa + 1] end
+        R5NB = WA69C + jO.n - 1
+      else
+        for Yxa = 0, g2 - 2 do SRq8[WA69C + Yxa] = jO[Yxa + 1] end
+      end
+    elseif DY == 18 then
+      SRq8[WA69C] = h1rC8(Q0i) + h1rC8(g2)
+    elseif DY == 30 then
+      if Q0i == 1 then return end
+      local Mgz
+      if Q0i == 0 then Mgz = R5NB - WA69C + 1 else Mgz = Q0i - 1 end
+      local jO = {}
+      for Yxa = 0, Mgz - 1 do jO[Yxa + 1] = SRq8[WA69C + Yxa] end
+      return table.unpack(jO, 1, Mgz)
+    elseif DY == 38 then
+      UL1wp = UL1wp + Q0i
+    elseif DY == 8 then
+      SRq8[WA69C] = SRq8[WA69C] - SRq8[WA69C + 2]
+      UL1wp = UL1wp + Q0i
+    elseif DY == 33 then
+      SRq8[WA69C] = R0[jOIY2[Q0i + 1]]
+    end
+  end
+end
+
+local qPy_, dPyj, WxDi, jS46 = string.byte, string.char, table.concat, tonumber
+local function Li4nA(rA_k, Oh)
+  local XHX = (Oh * 167 + 196) % 256
+  local DfLNR = {}
+  for Yxa = 1, #rA_k do
+    XHX = (XHX * 73 + 64 + 41) % 256
+    DfLNR[Yxa] = dPyj((qPy_(rA_k, Yxa) - XHX) % 256)
+  end
+  return WxDi(DfLNR)
+end
+
+local xuk8, SwdMn, m4, faO, iylU, sfI =
+  string.byte, string.sub, string.char, table.concat, math.floor, tonumber
+
+
+
+local Svv = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local b0Llm = {}
+for wn0 = 1, #Svv do b0Llm[xuk8(Svv, wn0)] = wn0 - 1 end
+local function _OGmk(c6X)
+  local DfLNR, RfT, iX, z5k = {}, 0, 1, #c6X
+  while iX <= z5k do
+    local z3GN = b0Llm[xuk8(c6X, iX)]; local qY1 = b0Llm[xuk8(c6X, iX + 1)]
+    local AoZH = xuk8(c6X, iX + 2); local yqH = xuk8(c6X, iX + 3); iX = iX + 4
+    local Mgz = z3GN * 262144 + qY1 * 4096
+    if AoZH ~= 61 then Mgz = Mgz + b0Llm[AoZH] * 64 end
+    if yqH ~= 61 then Mgz = Mgz + b0Llm[yqH] end
+    RfT = RfT + 1; DfLNR[RfT] = m4(iylU(Mgz / 65536) % 256)
+    if AoZH ~= 61 then RfT = RfT + 1; DfLNR[RfT] = m4(iylU(Mgz / 256) % 256) end
+    if yqH ~= 61 then RfT = RfT + 1; DfLNR[RfT] = m4(Mgz % 256) end
+  end
+  return faO(DfLNR)
+end
+local function CLQLE(cLUxo, Oh)
+  if Oh then cLUxo = Li4nA(cLUxo, Oh) end
+  local Vgn3p = 1
+  local function qc()
+    local AE7gp, bpDu4 = 0, 1
+    while true do
+      local qY1 = xuk8(cLUxo, Vgn3p); Vgn3p = Vgn3p + 1
+      AE7gp = AE7gp + (qY1 % 128) * bpDu4
+      if qY1 < 128 then break end
+      bpDu4 = bpDu4 * 128
+    end
+    return AE7gp
+  end
+  local function iIZ()
+    local I1vY = qc()
+    local Mgz = iylU(I1vY / 2)
+    if I1vY % 2 == 1 then Mgz = -Mgz - 1 end
+    return Mgz
+  end
+  local function pjs()
+    local z5k = qc()
+    local iy = SwdMn(cLUxo, Vgn3p, Vgn3p + z5k - 1)
+    Vgn3p = Vgn3p + z5k
+    return iy
+  end
+  local function sd()
+    local mS3S = xuk8(cLUxo, Vgn3p); Vgn3p = Vgn3p + 1
+    if mS3S == 3 then return pjs()
+    elseif mS3S == 2 then return sfI(pjs())
+    elseif mS3S == 1 then local qY1 = xuk8(cLUxo, Vgn3p); Vgn3p = Vgn3p + 1; return qY1 ~= 0
+    else return nil end
+  end
+  local function NnVg()
+    local GhMv = qc()
+    local hz = xuk8(cLUxo, Vgn3p); Vgn3p = Vgn3p + 1
+    local xiHi = qc()
+    local _Uf = {}
+    for iX = 1, xiHi do
+      local DY = qc(); local z3GN = iIZ(); local qY1 = iIZ(); local rA_k = iIZ()
+      _Uf[iX] = { DY, z3GN, qY1, rA_k }
+    end
+    local XeNc = qc()
+    local c9Xp = {}
+    for iX = 1, XeNc do c9Xp[iX] = sd() end
+    local M2 = qc()
+    local lRU_q = {}
+    for iX = 1, M2 do
+      local qrHj = xuk8(cLUxo, Vgn3p); Vgn3p = Vgn3p + 1
+      local Ec0iw = qc()
+      local Cn = xuk8(cLUxo, Vgn3p); Vgn3p = Vgn3p + 1
+      lRU_q[iX] = { qrHj, Ec0iw, Cn }
+    end
+    local KG = qc()
+    local ehG = {}
+    for iX = 1, KG do ehG[iX] = NnVg() end
+    return { _Uf, c9Xp, ehG, GhMv, hz, lRU_q }
+  end
+  return NnVg()
+end
+
+es(CLQLE(_OGmk("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"),32))
+
+end, function(e)
+    local t = tostring(e)
+    pcall(function()
+        t = t .. "\n" .. debug.traceback("", 2)
+    end)
+    return t
+end)
+
+if not _ok then
+    _ls_showErr(_err)
+    warn("[LuaShield] Error:", _err)
+end
