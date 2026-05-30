@@ -4,7 +4,7 @@
 -- ══════════════════════════════════════════════════════════════════
 
 local SCRIPT_URL = "https://raw.githubusercontent.com/Razdla/ZaldaDPV3/refs/heads/main/HSHub_CoSKeysystemLoader.lua"
-local VALID_KEYS = { "Halycon" }
+local VALID_KEYS = { "Halcycon" }
 
 -- ─── SERVICES ────────────────────────────────────────────────────
 local Players          = game:GetService("Players")
