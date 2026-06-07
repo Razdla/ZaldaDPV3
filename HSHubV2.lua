@@ -35,6 +35,14 @@ local TweenService     = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local HttpService      = game:GetService("HttpService")
 local CoreGui          = game:GetService("CoreGui")
+local Players          = game:GetService("Players")
+
+-- ─── Platform detection ────────────────────────────────────────────────
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+local VP = (function()
+    local ok, v = pcall(function() return workspace.CurrentCamera.ViewportSize end)
+    return (ok and v) or Vector2.new(1920, 1080)
+end)()
 
 -- ─── Save folder (executor filesystem) ────────────────────────────────
 local SAVE_FOLDER = "HSHubV2"
@@ -77,11 +85,25 @@ local function Stroke(Parent, Color, Thickness)
 end
 
 local function getGuiParent()
+    -- gethui: Delta, Hydrogen, Fluxus mobile
     if gethui then
         local ok, h = pcall(gethui)
         if ok and h then return h end
     end
-    return CoreGui
+    -- Try parenting to CoreGui (most PC executors)
+    local canCore = pcall(function()
+        local t = Instance.new("Frame")
+        t.Parent = CoreGui
+        t:Destroy()
+    end)
+    if canCore then return CoreGui end
+    -- Fallback: PlayerGui (works when executor has no CoreGui access)
+    local lp = Players.LocalPlayer
+    if lp then
+        local pg = lp:FindFirstChildOfClass("PlayerGui")
+        if pg then return pg end
+    end
+    return CoreGui -- last resort
 end
 
 -- ─── Module ────────────────────────────────────────────────────────────
@@ -202,8 +224,19 @@ end
 ]]
 function HSHubV2:CreateWindow(Config)
     Config = Config or {}
-    local W_W = (Config.Size and Config.Size.X) or 720
-    local W_H = (Config.Size and Config.Size.Y) or 460
+    -- Responsive sizing: mobile gets a smaller default
+    local W_W, W_H
+    if Config.Size then
+        W_W = Config.Size.X
+        W_H = Config.Size.Y
+    elseif IsMobile then
+        W_W = math.min(390, VP.X - 10)
+        W_H = math.min(VP.Y - 60, 540)
+    else
+        W_W = math.min(720, VP.X - 10)
+        W_H = math.min(460, VP.Y - 40)
+    end
+    local SIDEBAR_W = IsMobile and 140 or 180
 
     local Window = { Visible = true }
 
@@ -214,6 +247,11 @@ function HSHubV2:CreateWindow(Config)
         IgnoreGuiInset = true,
         Parent         = getGuiParent(),
     })
+    -- Protect GUI from detection (Synapse X / some executors)
+    pcall(function()
+        if syn and syn.protect_gui then syn.protect_gui(Gui)
+        elseif protect_gui then protect_gui(Gui) end
+    end)
     _initNotify(Gui)
 
     -- ── Main frame ──
@@ -426,15 +464,46 @@ function HSHubV2:CreateWindow(Config)
     Corner(Float, 12)
     Stroke(Float, Theme.Border, 2)
 
+    -- Float button drag (important for mobile)
+    do
+        local fDragging, fDragStart, fStartPos = false, nil, nil
+        local fMoved = false
+        Float.InputBegan:Connect(function(I)
+            if I.UserInputType == Enum.UserInputType.MouseButton1
+            or I.UserInputType == Enum.UserInputType.Touch then
+                fDragging  = true
+                fMoved     = false
+                fDragStart = I.Position
+                fStartPos  = Float.Position
+                I.Changed:Connect(function()
+                    if I.UserInputState == Enum.UserInputState.End then
+                        fDragging = false
+                    end
+                end)
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(I)
+            if not fDragging then return end
+            if I.UserInputType ~= Enum.UserInputType.MouseMovement
+            and I.UserInputType ~= Enum.UserInputType.Touch then return end
+            local D = I.Position - fDragStart
+            if D.Magnitude > 4 then fMoved = true end
+            Float.Position = UDim2.new(
+                fStartPos.X.Scale, fStartPos.X.Offset + D.X,
+                fStartPos.Y.Scale, fStartPos.Y.Offset + D.Y)
+        end)
+        Float.MouseButton1Click:Connect(function()
+            if fMoved then fMoved = false return end
+            Main.Visible = true
+            Float.Visible = false
+            Window.Visible = true
+        end)
+    end
+
     Close.MouseButton1Click:Connect(function()
         Main.Visible = false
         Float.Visible = true
         Window.Visible = false
-    end)
-    Float.MouseButton1Click:Connect(function()
-        Main.Visible = true
-        Float.Visible = false
-        Window.Visible = true
     end)
 
     -- ── Border pulse (PART 1K) ──
@@ -455,7 +524,7 @@ function HSHubV2:CreateWindow(Config)
         BackgroundColor3 = Theme.BgPanel,
         BorderSizePixel  = 0,
         Position         = UDim2.fromOffset(0, 60),
-        Size             = UDim2.new(0, 180, 1, -70),
+        Size             = UDim2.new(0, SIDEBAR_W, 1, -70),
     })
     Corner(Sidebar, 12)
     local SidebarStroke = Stroke(Sidebar, Theme.Border, 1)
@@ -487,8 +556,8 @@ function HSHubV2:CreateWindow(Config)
     local Content = New("Frame", {
         Parent             = Main,
         BackgroundTransparency = 1,
-        Position           = UDim2.fromOffset(190, 60),
-        Size               = UDim2.new(1, -200, 1, -70),
+        Position           = UDim2.fromOffset(SIDEBAR_W + 10, 60),
+        Size               = UDim2.new(1, -(SIDEBAR_W + 20), 1, -70),
     })
     Window.Content = Content
 
@@ -526,7 +595,7 @@ function HSHubV2:CreateWindow(Config)
 
         local Button = New("TextButton", {
             Parent             = TabHolder,
-            Size               = UDim2.new(1, -10, 0, 38),
+            Size               = UDim2.new(1, -8, 0, 38),
             BackgroundTransparency = 1,
             Text               = "",
         })
@@ -551,9 +620,10 @@ function HSHubV2:CreateWindow(Config)
             Size               = UDim2.new(1, -14, 1, 0),
             Text               = string.format("%s  %s", Icon, string.upper(Name)),
             Font               = Enum.Font.GothamBold,
-            TextSize           = 13,
+            TextSize           = IsMobile and 11 or 13,
             TextColor3         = Theme.TextDim,
             TextXAlignment     = Enum.TextXAlignment.Left,
+            TextTruncate       = Enum.TextTruncate.AtEnd,
         })
 
         -- Tab page (scrollable)
@@ -1015,6 +1085,13 @@ function HSHubV2:CreateWindow(Config)
                         SDragging = true
                     end
                 end)
+                -- Global InputEnded: catches touch/mouse release anywhere on screen
+                UserInputService.InputEnded:Connect(function(I)
+                    if I.UserInputType == Enum.UserInputType.MouseButton1
+                    or I.UserInputType == Enum.UserInputType.Touch then
+                        SDragging = false
+                    end
+                end)
                 DragBtn.InputEnded:Connect(function(I)
                     if I.UserInputType == Enum.UserInputType.MouseButton1
                     or I.UserInputType == Enum.UserInputType.Touch then
@@ -1306,7 +1383,8 @@ function HSHubV2:CreateWindow(Config)
         if not readfile then return false end
         Name = Name or "Default"
         local path = SAVE_FOLDER .. "/" .. Name .. ".json"
-        if not isfile(path) then return false end
+        -- Guard: isfile may not exist on all executors
+        if isfile and not isfile(path) then return false end
         local ok, data = pcall(function()
             return HttpService:JSONDecode(readfile(path))
         end)
